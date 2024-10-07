@@ -1,3 +1,6 @@
+#include <grpcpp/channel.h>
+#include <grpcpp/client_context.h>
+#include <grpc/status.h>
 #include "client_helper.h"
 
 using grpc::Channel;

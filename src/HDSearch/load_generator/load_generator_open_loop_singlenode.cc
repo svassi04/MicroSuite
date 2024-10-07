@@ -4,10 +4,11 @@
 #include <iostream>
 #include <memory>
 #include <random>
-#include <stdlib.h> 
+#include <stdlib.h>
 #include <string>
 #include <sys/time.h>
-
+#include <iostream>
+#include <fstream>
 #include <grpc++/grpc++.h>
 #include <thread>
 
@@ -25,6 +26,7 @@ using loadgen_index::LoadGenRequest;
 using loadgen_index::ResponseIndexKnnQueries;
 using loadgen_index::LoadGenIndex;
 
+std::string cpu = "";
 unsigned int number_of_bucket_servers = 0;
 Atomics* num_requests = new Atomics();
 Atomics* responses_recvd = new Atomics();
@@ -42,6 +44,7 @@ std::mutex global_stat_mutex;
 bool first_req_flag = false;
 std::mutex cout_lock, kill_ack_lock;
 int num_inline = 0, num_workers = 0, num_resp = 0;
+uint64_t c6_residency_start=0, c6_residency_end=0;
 
 #define NODEBUG
 
@@ -57,18 +60,12 @@ class LoadGenIndexClient {
                 const unsigned &number_of_nearest_neighbors,
                 const bool util_request,
                 const bool kill) {
-#ifndef NODEBUG
-     std::cout << "Loading...\n";
-#endif
             uint64_t start = GetTimeInMicro();
             // Get the dimension
             int dimension = queries->GetPointAtIndex(0).GetSize();
             // Declare the set of queries & #NN that must be sent.
             LoadGenRequest load_gen_request;
             load_gen_request.set_kill(kill);
-#ifndef NODEBUG
-     std::cout << "Creating RPC...\n";
-#endif
 
             // Create RCP request by adding queries and number of NN.
             CreateIndexServiceRequest(*queries,
@@ -79,9 +76,6 @@ class LoadGenIndexClient {
                     util_request,
                     &load_gen_request);
 
-#ifndef NODEBUG
-     std::cout << "RPC Created...\n";
-#endif
             // Call object to store rpc data
             AsyncClientCall* call = new AsyncClientCall;
             //uint64_t request_id = reinterpret_cast<uintptr_t>(call);
@@ -89,9 +83,9 @@ class LoadGenIndexClient {
             load_gen_request.set_request_id(request_id);
             load_gen_request.set_load((int)(qps));
             resp_times[request_id] = GetTimeInMicro();
-            call->index_reply.set_create_index_req_time(GetTimeInMicro() - start); 
+            call->index_reply.set_create_index_req_time(GetTimeInMicro() - start);
 
-            /* A.S The following line work if you want 
+            /* A.S The following line work if you want
                to invoke acuracy script.*/
             //cout_lock.lock();
             //std::cout << request_id << " q " << query_id << std::endl;
@@ -176,7 +170,7 @@ class LoadGenIndexClient {
                     timing_info->create_index_req_time = call->index_reply.create_index_req_time();
                     timing_info->update_index_util_time = call->index_reply.update_index_util_time();
                     timing_info->get_bucket_responses_time = call->index_reply.get_bucket_responses_time();
-                    /*WriteKNNToFile("/home/liush/highdimensionalsearch/results/async_results.txt", 
+                    /*WriteKNNToFile("/home/liush/highdimensionalsearch/results/async_results.txt",
                       knn_answer);*/
                     timing_info->total_resp_time = resp_times[request_id];
 
@@ -188,13 +182,13 @@ class LoadGenIndexClient {
                             global_stats);
                     global_stat_mutex.unlock();
                     if((util_requests->AtomicallyReadCount() != 1) && (call->index_reply.util_response().util_present())) {
-                        UpdateGlobalUtilStats(percent_util_info, 
+                        UpdateGlobalUtilStats(percent_util_info,
                                 number_of_bucket_servers,
                                 global_stats);
                     }
                     //WriteTimingInfoToFile(timing_file, *timing_info);
 
-                    /* A.S The following two lines work if you want 
+                    /* A.S The following two lines work if you want
                        to invoke acuracy script.*/
 #if 0
                     cout_lock.lock();
@@ -204,7 +198,7 @@ class LoadGenIndexClient {
 #endif
 
                     responses_recvd->AtomicallyIncrementCount();
-                    if (responses_recvd->AtomicallyReadCount() == 1) { 
+                    if (responses_recvd->AtomicallyReadCount() == 1) {
                         // Print the index config that we got this data for.
                         std::cout << call->index_reply.num_inline() << " " << call->index_reply.num_workers() << " " << call->index_reply.num_resp() << " ";
 
@@ -253,10 +247,8 @@ class LoadGenIndexClient {
 };
 
 int main(int argc, char** argv) {
-#ifndef NODEBUG
-     std::cout << "Starting...\n";
-#endif
-     /* Get path to queries (batch/single) and the number of
+
+    /* Get path to queries (batch/single) and the number of
        nearest neighbors via the command line.*/
     unsigned int number_of_nearest_neighbors = 0;
     std::string queries_file_name, result_file_name;
@@ -272,27 +264,16 @@ int main(int argc, char** argv) {
     qps_file_name = load_gen_command_line_args->qps_file_name;
     timing_file_name = load_gen_command_line_args->timing_file_name;
     std::string util_file_name = load_gen_command_line_args->util_file_name;
-#ifndef NODEBUG
-     std::cout << "Arguments loaded...\n";
-#endif
+    cpu = load_gen_command_line_args->cpu;
     CHECK((time_duration >= 0), "ERROR: Offered load (time in seconds) must always be a positive value");
     struct TimingInfo timing_info;
     // Create queries from query file.
     MultiplePoints queries;
-#ifndef NODEBUG
-     std::cout << "Reading queries file...\n";
-#endif
     uint64_t start_time, end_time;
     start_time = GetTimeInMicro();
     CreatePointsFromBinFile(queries_file_name, &queries);
     end_time = GetTimeInMicro();
-#ifndef NODEBUG
-     std::cout << "Reading completed...\n";
-#endif
     timing_info.create_queries_time = end_time - start_time;
-#ifndef NODEBUG
-     std::cout << "Loading queries...\n";
-#endif
     long queries_size = queries.GetSize();
 
     // Instantiate the client. It requires a channel, out of which the actual RPCs
@@ -303,9 +284,6 @@ int main(int argc, char** argv) {
     LoadGenIndexClient loadgen_index(grpc::CreateChannel(
                 ip_port, grpc::InsecureChannelCredentials()));
 
-#ifndef NODEBUG
-     std::cout << "Spawn reader...\n";
-#endif
     // Spawn reader thread that loops indefinitely
     std::thread thread_ = std::thread(&LoadGenIndexClient::AsyncCompleteRpc, &loadgen_index);
     //std::thread thread2 = std::thread(&LoadGenIndexClient::AsyncCompleteRpc, &loadgen_index);
@@ -320,55 +298,189 @@ int main(int argc, char** argv) {
     std::default_random_engine generator;
     std::poisson_distribution<int> distribution(center);
     double next_time = distribution(generator) + curr_time;
-#ifndef NODEBUG
-     std::cout << "Declaring poisson distribution...\n";
-#endif
-    while (curr_time < exit_time) 
+    std::string line;
+    std::ifstream myfile;
+    int c6_counter = 0;
+
+    //warmup phase
+    query.SetPoint(0, queries.GetPointAtIndex(index));
+    while (responses_recvd->AtomicallyReadCount() != 50)
     {
-        if (curr_time >= next_time) 
+
+        //check if responses received == requests send
+
+        if ( responses_recvd->AtomicallyReadCount() == num_requests->AtomicallyReadCount())
         {
+            //check if c6 enabled
+            myfile.open("/sys/devices/system/cpu/cpu" + cpu + "/cpuidle/state3/time");
+            if (myfile)
+            {
+
+                getline (myfile, line);
+                c6_residency_end = std::stoul(line, nullptr, 10);
+            }
+            else
+            {
+                c6_residency_end = std::stoul("100", nullptr, 10);
+            }
+            myfile.close();
+            if (c6_residency_end > c6_residency_start && num_requests->AtomicallyReadCount()!=0 )
+            {
+                c6_counter = c6_counter + 1;
+            }
+
+            //send request
+
             num_requests->AtomicallyIncrementCount();
-            /* If this is the first request, we must gather util info
-               so that we can track util periodically after every 10 seconds.*/
-            /* Before sending every request, we check to see if
-               the time (10 sec) has expired, so that we can decide to
-               fill the util_request field to get the util info from
-               buckets and index. Otherwise, we do not request
-               for util info (false).*/
-            if((num_requests->AtomicallyReadCount() == 1) || ((GetTimeInSec() - interval_start_time) >= 5)){
+            loadgen_index.LoadGen_Index(&query,
+                    index,
+                    query.GetSize(),
+                    number_of_nearest_neighbors,
+                    false,
+                    false);
+
+            sleep(1);
+
+            //check if c6 enabled
+            myfile.open("/sys/devices/system/cpu/cpu" + cpu + "/cpuidle/state3/time");
+            if (myfile)
+            {
+                getline (myfile, line);
+                c6_residency_start = std::stoul(line, nullptr, 10);
+            }
+            else
+            {
+                c6_residency_start = std::stoul("0", nullptr, 10);
+            }
+            myfile.close();
+
+            sleep(3);
+
+            index = rand() % queries_size;
+            query.SetPoint(0, queries.GetPointAtIndex(index));
+        }
+    }
+    myfile.close();
+    myfile.open("/sys/devices/system/cpu/cpu" + cpu + "/cpuidle/state3/time");
+    if (myfile) 
+    {
+        getline (myfile, line);
+        c6_residency_end = std::stoul(line, nullptr, 10);
+    }
+    else
+    {
+        c6_residency_end = std::stoul("100", nullptr, 10);
+    }
+    myfile.close();
+    if (c6_residency_end > c6_residency_start && num_requests->AtomicallyReadCount()!=0 )
+    {
+        c6_counter = c6_counter + 1;
+    }
+
+    if ( c6_counter == 0 )
+    {
+        std::cout << "Warmup C6 Transitions: " << c6_counter << "\n";
+        std::cout << "Warmup Troughput: " << responses_recvd->AtomicallyReadCount()  << "\n";
+        exit(1);
+    }
+    std::cout << "Warmup C6 Transitions: " << c6_counter << "\n";
+    std::cout << "Warmup Troughput: " << responses_recvd->AtomicallyReadCount()  << "\n";
+   
+    //actual run
+    c6_counter=0;
+    index = rand() % queries_size;
+    query.SetPoint(0, queries.GetPointAtIndex(index));
+    while (responses_recvd->AtomicallyReadCount() != 100)
+    {
+
+        //check if responses received == requests send
+        if ( responses_recvd->AtomicallyReadCount() == num_requests->AtomicallyReadCount())
+        {
+            //check if c6 enabled
+            myfile.open("/sys/devices/system/cpu/cpu" + cpu + "/cpuidle/state3/time");
+            if (myfile)
+            {
+                getline (myfile, line);
+                c6_residency_end = std::stoul(line, nullptr, 10);
+            }
+            else
+            {
+                c6_residency_end = std::stoul("100", nullptr, 10);
+            }
+            myfile.close();
+
+            if (c6_residency_end > c6_residency_start && num_requests->AtomicallyReadCount()!=50 )
+            {
+                c6_counter = c6_counter + 1;
+            }
+
+            //send request
+            num_requests->AtomicallyIncrementCount();
+            if((num_requests->AtomicallyReadCount() == 51)){
                 util_requests->AtomicallyIncrementCount();
                 loadgen_index.LoadGen_Index(&query,
-                        index,
-                        query.GetSize(),
-                        number_of_nearest_neighbors,
-                        true,
-                        false);
-                interval_start_time = GetTimeInSec();
+                    index,
+                    query.GetSize(),
+                    number_of_nearest_neighbors,
+                    true,
+                    false);
+
             } else {
                 loadgen_index.LoadGen_Index(&query,
-                        index,
-                        query.GetSize(),
-                        number_of_nearest_neighbors,
-                        false,
-                        false);
+                    index,
+                    query.GetSize(),
+                    number_of_nearest_neighbors,
+                    false,
+                    false);
             }
-            next_time = distribution(generator) + curr_time;
-            index = rand() % queries_size;
 
+            sleep(1);
+
+            //check if c6 enabled
+            myfile.open("/sys/devices/system/cpu/cpu" + cpu + "/cpuidle/state3/time");
+            if (myfile)
+            {
+                getline (myfile, line);
+                c6_residency_start = std::stoul(line, nullptr, 10);
+            }
+            else
+            {
+                c6_residency_start = std::stoul("0", nullptr, 10);
+            }
+            myfile.close();
+
+            sleep(3);
+
+            index = rand() % queries_size;
             query.SetPoint(0, queries.GetPointAtIndex(index));
-        } 
-        curr_time = (double)GetTimeInMicro();
+
+        }
+    }
+   
+    myfile.close();
+    myfile.open("/sys/devices/system/cpu/cpu" + cpu + "/cpuidle/state3/time");
+    if (myfile) 
+    {
+        getline (myfile, line);
+        c6_residency_end = std::stoul(line, nullptr, 10);
+    }
+    else
+    {
+        c6_residency_end = std::stoul("100", nullptr, 10);
+    }
+    myfile.close();
+    if (c6_residency_end > c6_residency_start && num_requests->AtomicallyReadCount()!=0 )
+    {
+        c6_counter = c6_counter + 1;
     }
     /*std::string qps_file_name_final = qps_file_name + std::to_string(qps) + ".txt";
       std::ofstream qps_file(qps_file_name_final);
       CHECK(qps_file.good(), "ERROR: Could not open QPS file.\n");
       qps_file << qps_to_file << "\n";
       qps_file.close();*/
-#ifndef NODEBUG
-     std::cout << "Loop completed...\n";
-#endif
-
     float achieved_qps = (float)responses_recvd->AtomicallyReadCount()/(float)time_duration;
+    std::cout << "Actual Run C6 Transitions: " << c6_counter << "\n";
+    std::cout << "Actual Run Troughput: " << responses_recvd->AtomicallyReadCount()  << "\n";
 
     global_stat_mutex.lock();
 #if 0
@@ -391,13 +503,13 @@ int main(int argc, char** argv) {
             (util_requests-1));
     global_stat_mutex.unlock();
 #endif
-    /*WriteToUtilFile(util_file_name, 
+    /*WriteToUtilFile(util_file_name,
      *global_stats,
      number_of_bucket_servers,
      (util_requests-1));*/
-    float query_cost = ComputeQueryCost(*global_stats, 
+    float query_cost = ComputeQueryCost(*global_stats,
             (util_requests->AtomicallyReadCount() - 1),
-            number_of_bucket_servers, 
+            number_of_bucket_servers,
             achieved_qps);
     global_stat_mutex.unlock();
     std::cout << " " << query_cost << std::endl;

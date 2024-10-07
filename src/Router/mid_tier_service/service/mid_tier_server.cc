@@ -477,6 +477,9 @@ class LookupServiceClient {
             }
             response_count_down_map[unique_request_id_value].responses_recvd = 0;
             response_count_down_map[unique_request_id_value].response_data.resize(replication_cnt, ResponseData());
+            for (int i = 0; i < replication_cnt; i++) {
+                response_count_down_map[unique_request_id_value].response_data[i] = ResponseData();
+            }
             response_count_down_map[unique_request_id_value].router_reply->set_request_id(router_request.request_id());
             response_count_down_map[unique_request_id_value].router_reply->set_num_inline(router_parallelism);
             response_count_down_map[unique_request_id_value].router_reply->set_num_workers(dispatch_parallelism);
@@ -716,7 +719,7 @@ class LookupServiceClient {
             {
                 response_threads.emplace_back(std::thread(ProcessResponses));
             }
-
+/*
             std::thread kill_ack = std::thread(FinalKill);
 #if 0
             std::thread perf(Perf);
@@ -729,14 +732,14 @@ class LookupServiceClient {
             std::thread runqlat(Runqlat);
             //std::thread hitm(Hitm);
             std::thread tcpretrans(Tcpretrans);
-
+*/
             server = new ServerImpl();
             server->Run();
             for(unsigned int i = 0; i < number_of_response_threads; i++)
             {
                 response_threads[i].join();
             }
-
+/*
             kill_ack.join();
             perf.join();
             syscount.join();
@@ -749,6 +752,6 @@ class LookupServiceClient {
 #if 0
             perf.join();
 #endif
-
+*/
             return 0;
         }

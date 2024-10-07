@@ -13,12 +13,15 @@ INDEX_PATH = ../mid_tier_service
 
 vpath %.proto $(PROTOS_PATH)
 
-all: system-check load_generator_closed_loop load_generator_open_loop kill_router_server_empty
+all: system-check load_generator_open_loop_warmup load_generator_closed_loop load_generator_open_loop kill_router_server_empty
 
 load_generator_closed_loop: $(PROTOS_PATH)/router.pb.o $(PROTOS_PATH)/router.grpc.pb.o helper_files/loadgen_router_client_helper.o $(INDEX_PATH)/service/helper_files/timing.o $(INDEX_PATH)/service/helper_files/utils.o load_generator_closed_loop.o
 	$(CXX) $^ -O3 -o $@ $(LDFLAGS)
 
 load_generator_open_loop: $(PROTOS_PATH)/router.pb.o $(PROTOS_PATH)/router.grpc.pb.o helper_files/loadgen_router_client_helper.o $(INDEX_PATH)/service/helper_files/timing.o $(INDEX_PATH)/service/helper_files/utils.o load_generator_open_loop.o 
+	$(CXX) $^ -O3 -o $@ $(LDFLAGS)
+
+load_generator_open_loop_warmup: $(PROTOS_PATH)/router.pb.o $(PROTOS_PATH)/router.grpc.pb.o helper_files/loadgen_router_client_helper.o $(INDEX_PATH)/service/helper_files/timing.o $(INDEX_PATH)/service/helper_files/utils.o load_generator_open_loop_warmup.o
 	$(CXX) $^ -O3 -o $@ $(LDFLAGS)
 
 kill_router_server_empty: $(PROTOS_PATH)/router.pb.o $(PROTOS_PATH)/router.grpc.pb.o helper_files/loadgen_router_client_helper.o $(INDEX_PATH)/service/helper_files/timing.o $(INDEX_PATH)/service/helper_files/utils.o kill_router_server_empty.o
@@ -33,7 +36,7 @@ kill_router_server_empty: $(PROTOS_PATH)/router.pb.o $(PROTOS_PATH)/router.grpc.
 	$(PROTOC) -I $(PROTOS_PATH) --cpp_out=. $<
 
 clean:
-	rm -f *.o *.pb.cc *.pb.h load_generator_closed_loop load_generator_open_loop kill_router_server_empty
+	rm -f *.o *.pb.cc *.pb.h load_generator_open_loop_warmup load_generator_closed_loop load_generator_open_loop kill_router_server_empty
 
 
 # The following is to test your system and ensure a smoother experience.
