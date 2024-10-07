@@ -351,6 +351,18 @@ class IntersectionServiceClient {
                         &posting_list,
                         &intersection_srv_timing_info,
                         &intersection_srv_util);
+                /*std::cout << "call->reply ";
+                for(int i = 0; i < call->reply.doc_ids_size(); i++) {
+                    std::cout << call->reply.doc_ids(i) << "-";
+                    std::cout << posting_list[i] << " " ;
+                }
+                std::cout << "\n";
+
+                std::cout << "posting_list " << posting_list.size() << " ";
+                for(unsigned int k = 0; k < posting_list.size(); k++){
+                    std::cout << posting_list[k];
+                }
+                std::cout << "\n";*/
                 uint64_t end_time = GetTimeInMicro();
                 // Make sure that the map entry corresponding to request id exists.
                 map_coarse_mutex.lock();
@@ -465,6 +477,9 @@ class IntersectionServiceClient {
             }
             response_count_down_map[unique_request_id_value].responses_recvd = 0;
             response_count_down_map[unique_request_id_value].response_data.resize(number_of_intersection_servers, ResponseData());
+            for (int i = 0; i < number_of_intersection_servers; i++) {
+                response_count_down_map[unique_request_id_value].response_data[i] = ResponseData();
+            }
             response_count_down_map[unique_request_id_value].union_reply->set_request_id(union_request.request_id());
             response_count_down_map[unique_request_id_value].union_reply->set_num_inline(union_parallelism);
             response_count_down_map[unique_request_id_value].union_reply->set_num_workers(dispatch_parallelism);
@@ -689,7 +704,7 @@ class IntersectionServiceClient {
                 }
             }
             std::vector<std::thread> response_threads;
-#if 0
+/*#if 0
             std::thread perf(Perf);
 #endif
             std::thread perf(Perf);
@@ -700,13 +715,13 @@ class IntersectionServiceClient {
             std::thread runqlat(Runqlat);
             //std::thread hitm(Hitm);
             std::thread tcpretrans(Tcpretrans);
-
+*/
             for(unsigned int i = 0; i < number_of_response_threads; i++)
             {
                 response_threads.emplace_back(std::thread(ProcessResponses));
             }
 
-            std::thread kill_ack = std::thread(FinalKill);
+//            std::thread kill_ack = std::thread(FinalKill);
 
             server = new ServerImpl();
             server->Run();
@@ -714,7 +729,7 @@ class IntersectionServiceClient {
             {
                 response_threads[i].join();
             }
-
+/*
             kill_ack.join();
             perf.join();
             syscount.join();
@@ -727,5 +742,5 @@ class IntersectionServiceClient {
 #if 0
             perf.join();
 #endif
-            return 0;
+*/            return 0;
         }
