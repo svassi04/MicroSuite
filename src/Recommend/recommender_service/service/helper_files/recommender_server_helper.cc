@@ -80,6 +80,7 @@ void MergeAndPack(const std::vector<ResponseData> &response_data,
     float final_rating = 0.0;
 
     for(int i = 0; i < number_of_cf_servers; i++) {
+        //std::cout << "server " << i << " rating: " << *(response_data[i].rating) << "\n";
         final_rating += *(response_data[i].rating);
         create_cf_srv_req_time += response_data[i].cf_srv_timing_info->create_cf_srv_request_time;
         unpack_cf_srv_resp_time += response_data[i].cf_srv_timing_info->unpack_cf_srv_resp_time;
@@ -89,6 +90,7 @@ void MergeAndPack(const std::vector<ResponseData> &response_data,
     }
     final_rating = final_rating / number_of_cf_servers;
     recommender_reply->set_rating(final_rating);
+    //std::cout << "final_rating: " << final_rating << "\n\n\n";
 
     create_cf_srv_req_time = create_cf_srv_req_time/number_of_cf_servers;
     unpack_cf_srv_resp_time = unpack_cf_srv_resp_time/number_of_cf_servers;
