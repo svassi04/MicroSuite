@@ -31,11 +31,14 @@ void UnpackUnionServiceRequest(const union_service::UnionRequest &union_request,
     Wordids word_id_val = 0;
     Wordids num_ids = union_request.word_ids_size();
 
+//    std::cout << "word_id_val ";
     for(unsigned int i = 0; i < num_ids; i++) {
         word_id_val = union_request.word_ids(i);
+//        std::cout << word_id_val << " ";
         word_ids->emplace_back(word_id_val);
         request_to_intersection_srv->add_word_ids(word_id_val);
     }
+//    std::cout << "\n";
 }
 
 void Merge(const struct ThreadArgs* thread_args,
@@ -85,11 +88,28 @@ void MergeAndPack(const std::vector<ResponseData> &response_data,
         intersection_srv_util->set_io_time(response_data[j].intersection_srv_util->io_time);
         intersection_srv_util->set_idle_time(response_data[j].intersection_srv_util->idle_time);
 
+//        std::cout << "response doc ids ";
         for(unsigned int k = 0; k < response_data[j].posting_list->size(); k++)
         {
             union_reply->add_doc_ids(response_data[j].posting_list->at(k));
+//            std::cout << response_data[j].posting_list->at(k) << "-";
+	    //std::cout << union_reply->doc_ids(k) << " ";
         }
+//        std::cout << "\n";
     }
+/*
+    std::cout << "all dock ids ";
+    for(unsigned int j = 0; j < number_of_intersection_servers; j++)
+    {
+//	std::cout << "all dock ids ";
+        for(unsigned int k = 0; k < response_data[j].posting_list->size(); k++)
+        {
+	    std::cout << union_reply->doc_ids(k) << " ";
+	}
+//        std::cout << "\n";
+    }
+    std::cout << "\n";
+*/
     create_intersection_srv_req_time = create_intersection_srv_req_time/number_of_intersection_servers;
     unpack_intersection_srv_resp_time = unpack_intersection_srv_resp_time/number_of_intersection_servers;
     unpack_intersection_srv_req_time = unpack_intersection_srv_req_time/number_of_intersection_servers;
