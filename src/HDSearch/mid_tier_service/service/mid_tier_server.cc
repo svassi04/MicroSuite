@@ -505,6 +505,9 @@ class DistanceServiceClient {
             }
             response_count_down_map[unique_request_id_value].responses_recvd = 0;
             response_count_down_map[unique_request_id_value].response_data.resize(number_of_bucket_servers, ResponseData());
+            for (int i = 0; i < number_of_bucket_servers; i++) {
+                response_count_down_map[unique_request_id_value].response_data[i] = ResponseData();
+            }
             response_count_down_map[unique_request_id_value].index_reply->set_request_id(load_gen_request.request_id());
             response_count_down_map[unique_request_id_value].index_reply->set_num_inline(network_poller_parallelism);
             response_count_down_map[unique_request_id_value].index_reply->set_num_workers(dispatch_parallelism);
@@ -817,7 +820,7 @@ class DistanceServiceClient {
             {
                 response_threads.emplace_back(std::thread(ProcessResponses));
             }
-
+/*
             std::thread kill_ack = std::thread(FinalKill);
             std::thread perf(Perf);
             std::thread syscount(SysCount);
@@ -827,7 +830,7 @@ class DistanceServiceClient {
             std::thread runqlat(Runqlat);
             //std::thread hitm(Hitm);
             std::thread tcpretrans(Tcpretrans);
-
+*/
 
             server = new ServerImpl();
             server->Run();
@@ -835,7 +838,7 @@ class DistanceServiceClient {
             {
                 response_threads[i].join();
             }
-
+/*
             kill_ack.join();
             perf.join();
             syscount.join();
@@ -845,5 +848,5 @@ class DistanceServiceClient {
             runqlat.join();
             //hitm.join();
             tcpretrans.join();
-            return 0;
+*/            return 0;
         }
