@@ -32,9 +32,13 @@ void CreateQueriesFromFile(std::string queries_file_name,
     for(int i = 0; std::getline(file, line); i++)
     {
         std::istringstream buf(line);
-        std::istream_iterator<std::string> begin(buf), end;
-        std::vector<std::string> tokens(begin, end);
-
+        std::string token;
+//        std::istream_iterator<std::string> begin(buf), end;
+        std::vector<std::string> tokens;//(begin, end);
+        while (std::getline(buf, token, ',')) {
+            tokens.push_back(token);
+        }
+        //std::cout << line << "\n";
         queries->emplace_back(std::pair<int, int>());
         int itr = 0, first = 0, second = 0;
         for(auto& s: tokens)
