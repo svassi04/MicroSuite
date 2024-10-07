@@ -469,6 +469,9 @@ class CFServiceClient {
             }
             response_count_down_map[unique_request_id_value].responses_recvd = 0;
             response_count_down_map[unique_request_id_value].response_data.resize(number_of_cf_servers, ResponseData());
+            for (int i = 0; i < number_of_cf_servers; i++) {
+                response_count_down_map[unique_request_id_value].response_data[i] = ResponseData();
+            }
             response_count_down_map[unique_request_id_value].recommender_reply->set_request_id(recommender_request.request_id());
             response_count_down_map[unique_request_id_value].recommender_reply->set_num_inline(recommender_parallelism);
             response_count_down_map[unique_request_id_value].recommender_reply->set_num_workers(dispatch_parallelism);
@@ -505,6 +508,7 @@ class CFServiceClient {
                     &user,
                     &item,
                     &request_to_cf_srv);
+            //std::cout << "User: " << user << " Movie: " << item << "\n";
 #ifndef NODEBUG
             std::cout << "aft unpack\n";
 #endif
@@ -690,7 +694,7 @@ class CFServiceClient {
                 }
             }
             std::vector<std::thread> response_threads;
-            std::thread perf(Perf);
+/*            std::thread perf(Perf);
             std::thread syscount(SysCount);
             std::thread hardirqs(Hardirqs);
             std::thread wakeuptime(Wakeuptime);
@@ -698,13 +702,13 @@ class CFServiceClient {
             std::thread runqlat(Runqlat);
             //std::thread hitm(Hitm);
             std::thread tcpretrans(Tcpretrans);
-
+*/
             for(unsigned int i = 0; i < number_of_response_threads; i++)
             {
                 response_threads.emplace_back(std::thread(ProcessResponses));
             }
 
-            std::thread kill_ack = std::thread(FinalKill);
+//            std::thread kill_ack = std::thread(FinalKill);
 
             server = new ServerImpl();
             server->Run();
@@ -712,7 +716,7 @@ class CFServiceClient {
             {
                 response_threads[i].join();
             }
-
+/*
             kill_ack.join();
             perf.join();
             syscount.join();
@@ -722,5 +726,5 @@ class CFServiceClient {
             runqlat.join();
             //hitm.join();
             tcpretrans.join();
-            return 0;
+*/            return 0;
         }
