@@ -1,4 +1,5 @@
 #include "client_helper.h"
+#include <grpcpp/channel.h>
 
 using grpc::Channel;
 using grpc::ClientContext;
@@ -23,10 +24,15 @@ void UnpackIntersectionServiceResponse(const IntersectionResponse &reply,
         IntersectionSrvUtil* intersection_srv_util)
 {
     Docids num_ids = reply.doc_ids_size();
-    posting_list = new std::vector<Docids>();
+//    posting_list = new std::vector<Docids>();
+
+    //std::cout << "doc_ids";
     for(int i = 0; i < num_ids; i++) {
+        //std::cout << reply.doc_ids(i) << "-";
         posting_list->emplace_back(reply.doc_ids(i));
+        //std::cout << posting_list->at(i) << " ";
     }
+    //std::cout << "\n";
     UnpackTimingInfo(reply, intersection_srv_timing_info);
     UnpackUtilInfo(reply, intersection_srv_util);
 }
