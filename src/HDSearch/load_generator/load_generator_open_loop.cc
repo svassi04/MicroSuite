@@ -57,12 +57,18 @@ class LoadGenIndexClient {
                 const unsigned &number_of_nearest_neighbors,
                 const bool util_request,
                 const bool kill) {
+#ifndef NODEBUG
+     std::cout << "Loading...\n";
+#endif
             uint64_t start = GetTimeInMicro();
             // Get the dimension
             int dimension = queries->GetPointAtIndex(0).GetSize();
             // Declare the set of queries & #NN that must be sent.
             LoadGenRequest load_gen_request;
             load_gen_request.set_kill(kill);
+#ifndef NODEBUG
+     std::cout << "Creating RPC...\n";
+#endif
 
             // Create RCP request by adding queries and number of NN.
             CreateIndexServiceRequest(*queries,
@@ -73,6 +79,9 @@ class LoadGenIndexClient {
                     util_request,
                     &load_gen_request);
 
+#ifndef NODEBUG
+     std::cout << "RPC Created...\n";
+#endif
             // Call object to store rpc data
             AsyncClientCall* call = new AsyncClientCall;
             //uint64_t request_id = reinterpret_cast<uintptr_t>(call);
@@ -244,7 +253,10 @@ class LoadGenIndexClient {
 };
 
 int main(int argc, char** argv) {
-    /* Get path to queries (batch/single) and the number of
+#ifndef NODEBUG
+     std::cout << "Starting...\n";
+#endif
+     /* Get path to queries (batch/single) and the number of
        nearest neighbors via the command line.*/
     unsigned int number_of_nearest_neighbors = 0;
     std::string queries_file_name, result_file_name;
@@ -260,15 +272,27 @@ int main(int argc, char** argv) {
     qps_file_name = load_gen_command_line_args->qps_file_name;
     timing_file_name = load_gen_command_line_args->timing_file_name;
     std::string util_file_name = load_gen_command_line_args->util_file_name;
+#ifndef NODEBUG
+     std::cout << "Arguments loaded...\n";
+#endif
     CHECK((time_duration >= 0), "ERROR: Offered load (time in seconds) must always be a positive value");
     struct TimingInfo timing_info;
     // Create queries from query file.
     MultiplePoints queries;
+#ifndef NODEBUG
+     std::cout << "Reading queries file...\n";
+#endif
     uint64_t start_time, end_time;
     start_time = GetTimeInMicro();
     CreatePointsFromBinFile(queries_file_name, &queries);
     end_time = GetTimeInMicro();
+#ifndef NODEBUG
+     std::cout << "Reading completed...\n";
+#endif
     timing_info.create_queries_time = end_time - start_time;
+#ifndef NODEBUG
+     std::cout << "Loading queries...\n";
+#endif
     long queries_size = queries.GetSize();
 
     // Instantiate the client. It requires a channel, out of which the actual RPCs
@@ -279,6 +303,9 @@ int main(int argc, char** argv) {
     LoadGenIndexClient loadgen_index(grpc::CreateChannel(
                 ip_port, grpc::InsecureChannelCredentials()));
 
+#ifndef NODEBUG
+     std::cout << "Spawn reader...\n";
+#endif
     // Spawn reader thread that loops indefinitely
     std::thread thread_ = std::thread(&LoadGenIndexClient::AsyncCompleteRpc, &loadgen_index);
     //std::thread thread2 = std::thread(&LoadGenIndexClient::AsyncCompleteRpc, &loadgen_index);
@@ -293,7 +320,9 @@ int main(int argc, char** argv) {
     std::default_random_engine generator;
     std::poisson_distribution<int> distribution(center);
     double next_time = distribution(generator) + curr_time;
-
+#ifndef NODEBUG
+     std::cout << "Declaring poisson distribution...\n";
+#endif
     while (curr_time < exit_time) 
     {
         if (curr_time >= next_time) 
@@ -335,6 +364,9 @@ int main(int argc, char** argv) {
       CHECK(qps_file.good(), "ERROR: Could not open QPS file.\n");
       qps_file << qps_to_file << "\n";
       qps_file.close();*/
+#ifndef NODEBUG
+     std::cout << "Loop completed...\n";
+#endif
 
     float achieved_qps = (float)responses_recvd->AtomicallyReadCount()/(float)time_duration;
 
