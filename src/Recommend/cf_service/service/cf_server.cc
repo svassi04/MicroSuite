@@ -263,6 +263,7 @@ int main(int argc, char** argv) {
     } else {
         CHECK(false, "Format: ./<cf_server> <dataset file path> <IP address:Port Number> <Mode 1 - read dataset from text file OR Mode 2 - read dataset from binary file > <num of cores: -1 if you want all cores on the machine> <cf server number> <number of cf servers in the system>\n");
     }
+    std::cout << "Reading variables..." << "\n";	
     // Load the cf server IP
     ip_port = argv[2];
     int mode = atoi(argv[3]);
@@ -274,11 +275,15 @@ int main(int argc, char** argv) {
     cf_server_number = atoi(argv[5]);
     num_cf_servers = atoi(argv[6]);
 
+    std::cout << "Creating dataset..." << "\n";   
     CreateDatasetFromFile(dataset_file_name, &dataset);
 
+    std::cout << "Setting up matrix..." << "\n";   
+    //CF cf_matrix(dataset, amf::NMFALSFactorizer(), 5, 5);    
     cf_matrix = new CF(dataset, amf::NMFALSFactorizer(), 5, 5);    
-    cf_matrix->Init();
+    //cf_matrix->Init();
 
+    std::cout << "Starting server..." << "\n";   
     ServiceImpl server;
     server.Run();
     return 0;
