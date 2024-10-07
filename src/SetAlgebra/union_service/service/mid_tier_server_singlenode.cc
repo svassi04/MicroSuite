@@ -10,10 +10,10 @@
 
 #include <grpc++/grpc++.h>
 
-#include "cf_service/service/helper_files/client_helper.h"
-#include "recommender_service/service/helper_files/recommender_server_helper.h"
-#include "recommender_service/service/helper_files/timing.h"
-#include "recommender_service/service/helper_files/utils.h"
+#include "intersection_service/service/helper_files/client_helper.h"
+#include "union_service/service/helper_files/union_server_helper.h"
+#include "union_service/service/helper_files/timing.h"
+#include "union_service/service/helper_files/utils.h"
 
 #define NODEBUG
 
@@ -23,28 +23,28 @@ using grpc::ServerBuilder;
 using grpc::ServerContext;
 using grpc::ServerCompletionQueue;
 using grpc::Status;
-using recommender::RecommenderRequest;
-using recommender::RecommenderResponse;
-using recommender::RecommenderService;
+using union_service::UnionRequest;
+using union_service::UnionResponse;
+using union_service::UnionService;
 
 using grpc::Channel;
 using grpc::ClientAsyncResponseReader;
 using grpc::ClientContext;
 using grpc::CompletionQueue;
 using grpc::Status;
-using collaborative_filtering::CFRequest;
-using collaborative_filtering::UtilRequest;
-using collaborative_filtering::TimingDataInMicro;
-using collaborative_filtering::UtilResponse;
-using collaborative_filtering::CFResponse;
-using collaborative_filtering::CFService;
+using intersection::IntersectionRequest;
+using intersection::UtilRequest;
+using intersection::TimingDataInMicro;
+using intersection::UtilResponse;
+using intersection::IntersectionResponse;
+using intersection::IntersectionService;
 
 // Class declarations.
 class ServerImpl;
-class CFServiceClient;
+class IntersectionServiceClient;
 
 // Function declarations.
-void ProcessRequest(RecommenderRequest &recommender_request,
+void ProcessRequest(UnionRequest &union_request,
         uint64_t unique_request_id_value,
         int tid);
 
@@ -52,27 +52,27 @@ void ProcessRequest(RecommenderRequest &recommender_request,
 /* dataset_dim is global so that we can validate query dimensions whenever 
    batches of queries are received.*/
 
-unsigned int recommender_parallelism = 0, number_of_response_threads = 0, number_of_cf_servers = 1, dispatch_parallelism = 0;
-std::string ip = "localhost", cf_server_ips_file = "";
-std::vector<std::string> cf_server_ips;
+unsigned int union_parallelism = 0, number_of_response_threads = 0, number_of_intersection_servers = 1, dispatch_parallelism = 0;
+std::string ip = "localhost", intersection_server_ips_file = "";
+std::vector<std::string> intersection_server_ips;
 uint64_t num_requests = 0;
-std::vector<CFServiceClient*> cf_srv_connections;
-/* Server object is global so that the async cf_srv client
+std::vector<IntersectionServiceClient*> intersection_srv_connections;
+/* Server object is global so that the async intersection_srv client
    thread can access it after it has merged all responses.*/
 ServerImpl* server;
 ResponseMap response_count_down_map;
 
 ThreadSafeQueue<bool> kill_notify;
 /* Fine grained locking while looking at individual responses from
-   multiple cf_srv servers. Coarse grained locking when we want to add
+   multiple intersection_srv servers. Coarse grained locking when we want to add
    or remove an element from the map.*/
-std::mutex response_map_mutex, thread_id, cf_server_id_mutex, map_coarse_mutex;
-std::vector<mutex_wrapper> cf_srv_conn_mutex;
+std::mutex response_map_mutex, thread_id, intersection_server_id_mutex, map_coarse_mutex;
+std::vector<mutex_wrapper> intersection_srv_conn_mutex;
 std::map<uint64_t, std::unique_ptr<std::mutex> > map_fine_mutex;
 int get_profile_stats = 0;
 bool first_req = false;
 
-CompletionQueue* cf_srv_cq = new CompletionQueue();
+CompletionQueue* intersection_srv_cq = new CompletionQueue();
 
 bool kill_signal = false;
 
@@ -120,7 +120,7 @@ class ServerImpl final {
                multiple requests at once.*/
             omp_set_dynamic(0);
             omp_set_nested(1);
-            omp_set_num_threads(recommender_parallelism);
+            omp_set_num_threads(union_parallelism);
             int tid = -1;
 #pragma omp parallel
             {
@@ -134,14 +134,15 @@ class ServerImpl final {
             {
                 worker_threads[i].join();
             }
+
         }
 
         void Finish(uint64_t unique_request_id,
-                RecommenderResponse* recommender_reply)
+                UnionResponse* union_reply)
         {
 
             CallData* call_data_req_to_finish = (CallData*) unique_request_id;
-            call_data_req_to_finish->Finish(recommender_reply);
+            call_data_req_to_finish->Finish(union_reply);
         }
 
     private:
@@ -151,7 +152,7 @@ class ServerImpl final {
                 // Take in the "service" instance (in this case representing an asynchronous
                 // server) and the completion queue "cq" used for asynchronous communication
                 // with the gRPC runtime.
-                CallData(RecommenderService::AsyncService* service, ServerCompletionQueue* cq)
+                CallData(UnionService::AsyncService* service, ServerCompletionQueue* cq)
                     : service_(service), cq_(cq), responder_(&ctx_), status_(CREATE) {
                         // Invoke the serving logic right away.
                         int tid = 0;
@@ -168,7 +169,7 @@ class ServerImpl final {
                         // the tag uniquely identifying the request (so that different CallData
                         // instances can serve different requests concurrently), in this case
                         // the memory address of this CallData instance.
-                        service_->RequestRecommender(&ctx_, &recommender_request_, &responder_, cq_, cq_,
+                        service_->RequestUnion(&ctx_, &union_request_, &responder_, cq_, cq_,
                                 this);
                     } else if (status_ == PROCESS) {
                         // Spawn a new CallData instance to serve new clients while we process
@@ -178,14 +179,14 @@ class ServerImpl final {
                         uint64_t unique_request_id_value = reinterpret_cast<uintptr_t>(this);
                         //uint64_t unique_request_id_value = num_reqs->AtomicallyIncrementCount();
                         // The actual processing.
-                        ProcessRequest(recommender_request_, 
+                        ProcessRequest(union_request_, 
                                 unique_request_id_value, 
                                 tid);
                         // And we are done! Let the gRPC runtime know we've finished, using the
                         // memory address of this instance as the uniquely identifying tag for
                         // the event.
                         //status_ = FINISH;
-                        //responder_.Finish(recommender_reply_, Status::OK, this);
+                        //responder_.Finish(union_reply_, Status::OK, this);
                     } else {
                         //GPR_ASSERT(status_ == FINISH);
                         // Once in the FINISH state, deallocate ourselves (CallData).
@@ -193,17 +194,17 @@ class ServerImpl final {
                     }
                 }
 
-                void Finish(RecommenderResponse* recommender_reply)
+                void Finish(UnionResponse* union_reply)
                 {
                     status_ = FINISH;
                     //GPR_ASSERT(status_ == FINISH);
-                    responder_.Finish(*recommender_reply, Status::OK, this);
+                    responder_.Finish(*union_reply, Status::OK, this);
                 }
 
             private:
                 // The means of communication with the gRPC runtime for an asynchronous
                 // server.
-                RecommenderService::AsyncService* service_;
+                UnionService::AsyncService* service_;
                 // The producer-consumer queue where for asynchronous server notifications.
                 ServerCompletionQueue* cq_;
                 // Context for the rpc, allowing to tweak aspects of it such as the use
@@ -211,17 +212,18 @@ class ServerImpl final {
                 // client.
                 ServerContext ctx_;
                 // What we get from the client.
-                RecommenderRequest recommender_request_;
+                UnionRequest union_request_;
                 // What we send back to the client.
-                RecommenderResponse recommender_reply_;
+                UnionResponse union_reply_;
 
                 // The means to get back to the client.
-                ServerAsyncResponseWriter<RecommenderResponse> responder_;
+                ServerAsyncResponseWriter<UnionResponse> responder_;
 
                 // Let's implement a tiny state machine with the following states.
                 enum CallStatus { CREATE, PROCESS, FINISH };
                 CallStatus status_;  // The current serving state.
         };
+
 
         /* Function called by thread that is the worker. Network poller 
            hands requests to this worker thread via a 
@@ -267,32 +269,32 @@ class ServerImpl final {
         }
 
         std::unique_ptr<ServerCompletionQueue> cq_;
-        RecommenderService::AsyncService service_;
+        UnionService::AsyncService service_;
         std::unique_ptr<Server> server_;
 };
 
 
-/* Declaring cf_srv client here because the recommender server must
-   invoke the cf_srv client to send the queries+PointIDs to the cf_srv server.*/
-class CFServiceClient {
+/* Declaring intersection_srv client here because the union server must
+   invoke the intersection_srv client to send the queries+PointIDs to the intersection_srv server.*/
+class IntersectionServiceClient {
     public:
-        explicit CFServiceClient(std::shared_ptr<Channel> channel)
-            : stub_(CFService::NewStub(channel)) {}
+        explicit IntersectionServiceClient(std::shared_ptr<Channel> channel)
+            : stub_(IntersectionService::NewStub(channel)) {}
         /* Assambles the client's payload, sends it and presents the response back
            from the server.*/
-        void GetRating(const uint32_t cf_server_id,
+        void GetPostingLists(const uint32_t intersection_server_id,
                 const bool util_present,
                 uint64_t request_id,
-                CFRequest request_to_cf_srv)
+                IntersectionRequest &request_to_intersection_srv)
         {
             // Create RCP request by adding queries, point IDs, and number of NN.
-            CreateCFServiceRequest(cf_server_id,
+            CreateIntersectionServiceRequest(intersection_server_id,
                     util_present,
-                    &request_to_cf_srv);
-            request_to_cf_srv.set_request_id(request_id);
-            //cf_srv_timing_info->create_cf_srv_request_time = end_time - start_time;
+                    &request_to_intersection_srv);
+            request_to_intersection_srv.set_request_id(request_id);
+            //intersection_srv_timing_info->create_intersection_srv_request_time = end_time - start_time;
             // Container for the data we expect from the server.
-            CFResponse reply;
+            IntersectionResponse reply;
             // Context for the client. 
             ClientContext context;
             // Call object to store rpc data
@@ -300,7 +302,10 @@ class CFServiceClient {
             // stub_->AsyncSayHello() performs the RPC call, returning an instance to
             // store in "call". Because we are using the asynchronous API, we need to
             // hold on to the "call" instance in order to get updates on the ongoing RPC.
-            call->response_reader = stub_->AsyncCF(&call->context, request_to_cf_srv, cf_srv_cq);
+#ifndef NODEBUG
+            std::cout << "sending leaf req\n";
+#endif
+            call->response_reader = stub_->AsyncIntersection(&call->context, request_to_intersection_srv, intersection_srv_cq);
             // Request that, upon completion of the RPC, "reply" be updated with the
             // server's response; "status" with the indication of whether the operation
             // was successful. Tag the request with the memory address of the call object.
@@ -312,7 +317,10 @@ class CFServiceClient {
         void AsyncCompleteRpc() {
             void* got_tag;
             bool ok = false;
-            cf_srv_cq->Next(&got_tag, &ok);
+            intersection_srv_cq->Next(&got_tag, &ok);
+#ifndef NODEBUG
+            std::cout << "got leaf resp\n";
+#endif
             //auto r = cq_.AsyncNext(&got_tag, &ok, gpr_time_0(GPR_CLOCK_REALTIME));
             //if (r == ServerCompletionQueue::TIMEOUT) return;
             //if (r == ServerCompletionQueue::GOT_EVENT) {
@@ -328,21 +336,21 @@ class CFServiceClient {
                 uint64_t s1 = GetTimeInMicro();
                 uint64_t unique_request_id = call->reply.request_id();
                 /* When this is not the last response, we need to decrement the count
-                   as well as collect response meta data - knn answer, cf_srv util, and
-                   cf_srv timing info.
+                   as well as collect response meta data - knn answer, intersection_srv util, and
+                   intersection_srv timing info.
                    When this is the last request, we remove this request from the map and 
-                   merge responses from all cf_srvs.*/
-                /* Create local DistCalc, CFSrvTimingInfo, CFSrvUtil variables,
-                   so that this thread can unpack received cf_srv data into these variables
+                   merge responses from all intersection_srvs.*/
+                /* Create local DistCalc, IntersectionSrvTimingInfo, IntersectionSrvUtil variables,
+                   so that this thread can unpack received intersection_srv data into these variables
                    and then grab a lock to append to the response array in the map.*/
+                std::vector<Docids> posting_list;
+                IntersectionSrvTimingInfo intersection_srv_timing_info;
+                IntersectionSrvUtil intersection_srv_util;
                 uint64_t start_time = GetTimeInMicro();
-                float rating = 0.0;
-                CFSrvTimingInfo cf_srv_timing_info;
-                CFSrvUtil cf_srv_util;
-                UnpackCFServiceResponse(call->reply,
-                        &rating,     
-                        &cf_srv_timing_info,
-                        &cf_srv_util);
+                UnpackIntersectionServiceResponse(call->reply,
+                        &posting_list,
+                        &intersection_srv_timing_info,
+                        &intersection_srv_util);
                 uint64_t end_time = GetTimeInMicro();
                 // Make sure that the map entry corresponding to request id exists.
                 map_coarse_mutex.lock();
@@ -354,59 +362,50 @@ class CFServiceClient {
                 map_coarse_mutex.unlock();
 
                 map_fine_mutex[unique_request_id]->lock();
-                int cf_srv_resp_id = response_count_down_map[unique_request_id].responses_recvd;
-                *(response_count_down_map[unique_request_id].response_data[cf_srv_resp_id].rating) = rating;
-                *(response_count_down_map[unique_request_id].response_data[cf_srv_resp_id].cf_srv_timing_info) = cf_srv_timing_info;
-                *(response_count_down_map[unique_request_id].response_data[cf_srv_resp_id].cf_srv_util) = cf_srv_util;
-                response_count_down_map[unique_request_id].response_data[cf_srv_resp_id].cf_srv_timing_info->unpack_cf_srv_resp_time = end_time - start_time;
-                
-                uint64_t total_time = response_count_down_map[unique_request_id].recommender_reply->total_calc_time();
-                response_count_down_map[unique_request_id].recommender_reply->set_total_calc_time(cf_srv_timing_info.cf_srv_time + total_time);
+                int intersection_srv_resp_id = response_count_down_map[unique_request_id].responses_recvd;
+                *(response_count_down_map[unique_request_id].response_data[intersection_srv_resp_id].posting_list) = posting_list;
+                *(response_count_down_map[unique_request_id].response_data[intersection_srv_resp_id].intersection_srv_timing_info) = intersection_srv_timing_info;
+                *(response_count_down_map[unique_request_id].response_data[intersection_srv_resp_id].intersection_srv_util) = intersection_srv_util;
+                response_count_down_map[unique_request_id].response_data[intersection_srv_resp_id].intersection_srv_timing_info->unpack_intersection_srv_resp_time = end_time - start_time;
 
-                if (response_count_down_map[unique_request_id].responses_recvd != (number_of_cf_servers - 1)) {
+                if (response_count_down_map[unique_request_id].responses_recvd != (number_of_intersection_servers - 1)) {
                     response_count_down_map[unique_request_id].responses_recvd++;
                     map_fine_mutex[unique_request_id]->unlock();
-
                 } else {
-                    uint64_t cf_srv_resp_start_time = response_count_down_map[unique_request_id].recommender_reply->get_cf_srv_responses_time();
-                    response_count_down_map[unique_request_id].recommender_reply->set_get_cf_srv_responses_time(GetTimeInMicro() - cf_srv_resp_start_time);
+                    uint64_t intersection_srv_resp_start_time = response_count_down_map[unique_request_id].union_reply->get_intersection_srv_responses_time();
+                    response_count_down_map[unique_request_id].union_reply->set_get_intersection_srv_responses_time(GetTimeInMicro() - intersection_srv_resp_start_time);
                     /* Time to merge all responses received and then 
                        call terminate so that the response can be sent back
                        to the load generator.*/
-                    /* We now know that all cf_srvs have responded, hence we can 
+                    /* We now know that all intersection_srvs have responded, hence we can 
                        proceed to merge responses.*/
 
-                    /* We now know that all cf_srvs have responded, hence we can 
+                    /* We now know that all intersection_srvs have responded, hence we can 
                        proceed to merge responses.*/
 
                     start_time = GetTimeInMicro();
-
                     MergeAndPack(response_count_down_map[unique_request_id].response_data,
-                            number_of_cf_servers,
-                            response_count_down_map[unique_request_id].recommender_reply);
+                            number_of_intersection_servers,
+                            response_count_down_map[unique_request_id].union_reply);
 
                     end_time = GetTimeInMicro();
-                    // response_count_down_map[unique_request_id].recommender_reply->set_recommender_time(end_time - start_time);
-                    response_count_down_map[unique_request_id].recommender_reply->set_pack_recommender_resp_time(end_time - start_time); 
-                    //uint64_t recommender_time = response_count_down_map[unique_request_id].recommender_reply->recommender_time();
-                    //uint64_t total_time = response_count_down_map[unique_request_id].recommender_reply->total_calc_time();
-                    //response_count_down_map[unique_request_id].recommender_reply->set_total_calc_time(total_time + (GetTimeInMicro() - recommender_time));
-                    // response_count_down_map[unique_request_id].recommender_reply->set_recommender_time(GetTimeInMicro() - recommender_time);
-                    //response_count_down_map[unique_request_id].recommender_reply->set_recommender_time(recommender_times[unique_request_id]);
+                    //response_count_down_map[unique_request_id].union_reply->set_union_time(end_time - start_time);
+                    response_count_down_map[unique_request_id].union_reply->set_pack_union_resp_time(end_time - start_time); 
+                    //response_count_down_map[unique_request_id].union_reply->set_union_time(union_times[unique_request_id]);
                     /* Call server finish for this particular request,
                        and pass the response so that it can be sent
                        by the server to the frontend.*/
-                    uint64_t prev_rec = response_count_down_map[unique_request_id].recommender_reply->recommender_time();
-                    response_count_down_map[unique_request_id].recommender_reply->set_recommender_time(prev_rec + (GetTimeInMicro() - s1));
+                    uint64_t prev_rec = response_count_down_map[unique_request_id].union_reply->union_time();
+                    response_count_down_map[unique_request_id].union_reply->set_union_time(prev_rec + (GetTimeInMicro() - s1));
                     map_fine_mutex[unique_request_id]->unlock();
 
                     map_coarse_mutex.lock();
                     server->Finish(unique_request_id, 
-                            response_count_down_map[unique_request_id].recommender_reply);
+                            response_count_down_map[unique_request_id].union_reply);
                     map_coarse_mutex.unlock();
                 }
             } else {
-                CHECK(false, "cf_srv does not exist\n");
+                CHECK(false, "intersection_srv does not exist\n");
             }
             // Once we're complete, deallocate the call object.
             delete call;
@@ -416,32 +415,31 @@ class CFServiceClient {
         // struct for keeping state and data information
         struct AsyncClientCall {
             // Container for the data we expect from the server.
-            CFResponse reply;
+            IntersectionResponse reply;
             // Context for the client. It could be used to convey extra information to
             // the server and/or tweak certain RPC behaviors.
             ClientContext context;
             // Storage for the status of the RPC upon completion.
             Status status;
-            std::unique_ptr<ClientAsyncResponseReader<CFResponse>> response_reader;
+            std::unique_ptr<ClientAsyncResponseReader<IntersectionResponse>> response_reader;
         };
 
         // Out of the passed in Channel comes the stub, stored here, our view of the
         // server's exposed services.
-        std::unique_ptr<CFService::Stub> stub_;
+        std::unique_ptr<IntersectionService::Stub> stub_;
 
         // The producer-consumer queue we use to communicate asynchronously with the
         // gRPC runtime.
         CompletionQueue cq_;
         };
 
-        void ProcessRequest(RecommenderRequest &recommender_request, 
+        void ProcessRequest(UnionRequest &union_request, 
                 uint64_t unique_request_id_value,
                 int tid)
         {
             uint64_t s1 =0, e1 =0;
             s1 = GetTimeInMicro();
-            if (!started->AtomicallyReadFlag()) {
-                std::cout << "set\n";
+            if(!started->AtomicallyReadFlag()) {
                 started->AtomicallySetFlag(true);
             }
             /* Deine the map entry corresponding to this
@@ -457,31 +455,26 @@ class CFServiceClient {
             map_coarse_mutex.unlock();
 
             map_fine_mutex[unique_request_id_value]->lock();
-            if (recommender_request.kill()) {
-#if 0
+            if (union_request.kill()) {
                 kill_signal = true;
-                response_count_down_map[unique_request_id_value].recommender_reply->set_kill_ack(true);
+                response_count_down_map[unique_request_id_value].union_reply->set_kill_ack(true);
                 server->Finish(unique_request_id_value,
-                        response_count_down_map[unique_request_id_value].recommender_reply);
+                        response_count_down_map[unique_request_id_value].union_reply);
                 sleep(4);
                 CHECK(false, "Exit signal received\n");
-#endif
             }
             response_count_down_map[unique_request_id_value].responses_recvd = 0;
-            response_count_down_map[unique_request_id_value].response_data.resize(number_of_cf_servers, ResponseData());
-            for (int i = 0; i < number_of_cf_servers; i++) {
-                response_count_down_map[unique_request_id_value].response_data[i] = ResponseData();
-            }
-            response_count_down_map[unique_request_id_value].recommender_reply->set_request_id(recommender_request.request_id());
-            response_count_down_map[unique_request_id_value].recommender_reply->set_num_inline(recommender_parallelism);
-            response_count_down_map[unique_request_id_value].recommender_reply->set_num_workers(dispatch_parallelism);
-            response_count_down_map[unique_request_id_value].recommender_reply->set_num_resp(number_of_response_threads);
+            response_count_down_map[unique_request_id_value].response_data.resize(number_of_intersection_servers, ResponseData());
+            response_count_down_map[unique_request_id_value].union_reply->set_request_id(union_request.request_id());
+            response_count_down_map[unique_request_id_value].union_reply->set_num_inline(union_parallelism);
+            response_count_down_map[unique_request_id_value].union_reply->set_num_workers(dispatch_parallelism);
+            response_count_down_map[unique_request_id_value].union_reply->set_num_resp(number_of_response_threads);
             //map_fine_mutex[unique_request_id_value]->unlock();
 
-            bool util_present = recommender_request.util_request().util_request();
+            bool util_present = union_request.util_request().util_request();
             /* If the load generator is asking for util info,
                it means the time period has expired, so 
-               the recommender must read /proc/stat to provide user, system, and io times.*/
+               the union must read /proc/stat to provide user, system, and io times.*/
             if(util_present)
             {
                 uint64_t start = GetTimeInMicro();
@@ -491,62 +484,62 @@ class CFServiceClient {
                         &io_time,
                         &idle_time);
                 //map_fine_mutex[unique_request_id_value]->lock();
-                response_count_down_map[unique_request_id_value].recommender_reply->mutable_util_response()->mutable_recommender_util()->set_user_time(user_time);
-                response_count_down_map[unique_request_id_value].recommender_reply->mutable_util_response()->mutable_recommender_util()->set_system_time(system_time);
-                response_count_down_map[unique_request_id_value].recommender_reply->mutable_util_response()->mutable_recommender_util()->set_io_time(io_time);
-                response_count_down_map[unique_request_id_value].recommender_reply->mutable_util_response()->mutable_recommender_util()->set_idle_time(idle_time);
-                response_count_down_map[unique_request_id_value].recommender_reply->mutable_util_response()->set_util_present(true);
-                response_count_down_map[unique_request_id_value].recommender_reply->set_update_recommender_util_time(GetTimeInMicro() - start);
+                response_count_down_map[unique_request_id_value].union_reply->mutable_util_response()->mutable_union_util()->set_user_time(user_time);
+                response_count_down_map[unique_request_id_value].union_reply->mutable_util_response()->mutable_union_util()->set_system_time(system_time);
+                response_count_down_map[unique_request_id_value].union_reply->mutable_util_response()->mutable_union_util()->set_io_time(io_time);
+                response_count_down_map[unique_request_id_value].union_reply->mutable_util_response()->mutable_union_util()->set_idle_time(idle_time);
+                response_count_down_map[unique_request_id_value].union_reply->mutable_util_response()->set_util_present(true);
+                response_count_down_map[unique_request_id_value].union_reply->set_update_union_util_time(GetTimeInMicro() - start);
                 //map_fine_mutex[unique_request_id_value]->unlock();
             }
             uint64_t start_time = GetTimeInMicro();
             // Get #queries and #dimensions from received queries.
 
-            CFRequest request_to_cf_srv;
-            int user = 0, item = 0;
-            UnpackRecommenderServiceRequest(recommender_request,
-                    &user,
-                    &item,
-                    &request_to_cf_srv);
-            //std::cout << "User: " << user << " Movie: " << item << "\n";
+            IntersectionRequest request_to_intersection_srv;
+            std::vector<Wordids> word_ids;
+            UnpackUnionServiceRequest(union_request,
+                    &word_ids,
+                    &request_to_intersection_srv);
 #ifndef NODEBUG
             std::cout << "aft unpack\n";
 #endif
             uint64_t end_time = GetTimeInMicro();
             //map_fine_mutex[unique_request_id_value]->lock();
-            response_count_down_map[unique_request_id_value].recommender_reply->set_unpack_recommender_req_time((end_time-start_time));
-            // response_count_down_map[unique_request_id_value].recommender_reply->set_recommender_time(GetTimeInMicro());
+            response_count_down_map[unique_request_id_value].union_reply->set_unpack_union_req_time((end_time-start_time));
             //map_fine_mutex[unique_request_id_value]->unlock();
             //float points_sent_percent = PercentDataSent(point_ids, queries_size, dataset_size);
-            //printf("Amount of dataset sent to cf_srv server in the form of point IDs = %.5f\n", points_sent_percent);
-            //(*response_count_down_map)[unique_request_id_value]->recommender_reply->set_percent_data_sent(points_sent_percent);
+            //printf("Amount of dataset sent to intersection_srv server in the form of point IDs = %.5f\n", points_sent_percent);
+            //(*response_count_down_map)[unique_request_id_value]->union_reply->set_percent_data_sent(points_sent_percent);
 
             //map_fine_mutex[unique_request_id_value]->lock();
-            response_count_down_map[unique_request_id_value].recommender_reply->set_get_cf_srv_responses_time(GetTimeInMicro());
+            response_count_down_map[unique_request_id_value].union_reply->set_get_intersection_srv_responses_time(GetTimeInMicro());
             //map_fine_mutex[unique_request_id_value]->unlock();
 
 
-            for(unsigned int i = 0; i < number_of_cf_servers; i++) {
-                int index = (tid*number_of_cf_servers) + i;
-                cf_srv_connections[index]->GetRating(i,
+            for(unsigned int i = 0; i < number_of_intersection_servers; i++) {
+                int index = (tid*number_of_intersection_servers) + i;
+                intersection_srv_connections[index]->GetPostingLists(i,
                         util_present,
                         unique_request_id_value,
-                        request_to_cf_srv);
+                        request_to_intersection_srv);
             }
             e1 = GetTimeInMicro() - s1;
-            response_count_down_map[unique_request_id_value].recommender_reply->set_recommender_time(e1);
+            response_count_down_map[unique_request_id_value].union_reply->set_union_time(e1);
+
             map_fine_mutex[unique_request_id_value]->unlock();
+
         }
 
         /* The request processing thread runs this 
-           function. It checks all the cf_srv socket connections one by
+           function. It checks all the intersection_srv socket connections one by
            one to see if there is a response. If there is one, it then
            implements the count down mechanism in the global map.*/
         void ProcessResponses()
         {
             while(true)
             {
-                cf_srv_connections[0]->AsyncCompleteRpc();
+                intersection_srv_connections[0]->AsyncCompleteRpc();
+                sleep(1);
             }
 
         }
@@ -562,7 +555,7 @@ class CFServiceClient {
         }
 
         void Perf()
-        {
+        {   
             while (true) {
                 if (started->AtomicallyReadFlag()) {
                     std::cout << "cs\n";
@@ -636,8 +629,8 @@ class CFServiceClient {
             while (true) {
                 if (started->AtomicallyReadFlag()) {
                     std::string s = "sudo /usr/share/bcc/tools/runqlat 30 1 > runqlat.txt";
-                    char* cmd = new char[s.length() + 1];         
-                    std::strcpy(cmd, s.c_str());                                
+                    char* cmd = new char[s.length() + 1];
+                    std::strcpy(cmd, s.c_str());
                     ExecuteShellCommand(cmd);
                     break;
                 }
@@ -670,31 +663,37 @@ class CFServiceClient {
             }
         }
 
+
+
+
         int main(int argc, char** argv) {
             if (argc == 7) {
-                number_of_cf_servers = atoi(argv[1]);
-                cf_server_ips_file = argv[2];
+                number_of_intersection_servers = atoi(argv[1]);
+                intersection_server_ips_file = argv[2];
                 ip = argv[3];
-                recommender_parallelism = atoi(argv[4]);
+                union_parallelism = atoi(argv[4]);
                 dispatch_parallelism = atoi(argv[5]);
                 number_of_response_threads = atoi(argv[6]);
             } else {
-                CHECK(false, "<./recommender_server> <number of cf servers> <cf server ips file> <ip:port number> <recommender parallelism>\n");
+                CHECK(false, "<./union_server> <number of intersection servers> <intersection server ips file> <ip:port number> <union parallelism>\n");
             }
-            // Load cf server IPs into a string vector
-            GetCFServerIPs(cf_server_ips_file, &cf_server_ips);
+            // Load intersection server IPs into a string vector
+            GetIntersectionServerIPs(intersection_server_ips_file, &intersection_server_ips);
 
             for(unsigned int i = 0; i < dispatch_parallelism; i++)
             {
-                for(unsigned int j = 0; j < number_of_cf_servers; j++)
+                for(unsigned int j = 0; j < number_of_intersection_servers; j++)
                 {
-                    std::string ip = cf_server_ips[j];
-                    cf_srv_connections.emplace_back(new CFServiceClient(grpc::CreateChannel(
+                    std::string ip = intersection_server_ips[j];
+                    intersection_srv_connections.emplace_back(new IntersectionServiceClient(grpc::CreateChannel(
                                     ip, grpc::InsecureChannelCredentials())));
                 }
             }
             std::vector<std::thread> response_threads;
-/*            std::thread perf(Perf);
+#if 0
+     //       std::thread perf(Perf);
+#endif
+       /*     std::thread perf(Perf);
             std::thread syscount(SysCount);
             std::thread hardirqs(Hardirqs);
             std::thread wakeuptime(Wakeuptime);
@@ -708,7 +707,7 @@ class CFServiceClient {
                 response_threads.emplace_back(std::thread(ProcessResponses));
             }
 
-//            std::thread kill_ack = std::thread(FinalKill);
+  //          std::thread kill_ack = std::thread(FinalKill);
 
             server = new ServerImpl();
             server->Run();
@@ -716,8 +715,8 @@ class CFServiceClient {
             {
                 response_threads[i].join();
             }
-/*
-            kill_ack.join();
+
+    /*        kill_ack.join();
             perf.join();
             syscount.join();
             hardirqs.join();
@@ -725,6 +724,9 @@ class CFServiceClient {
             softirqs.join();
             runqlat.join();
             //hitm.join();
-            tcpretrans.join();
-*/            return 0;
+            tcpretrans.join(); */
+#if 0
+            //perf.join();
+#endif
+            return 0;
         }

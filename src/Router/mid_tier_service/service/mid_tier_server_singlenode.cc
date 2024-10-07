@@ -10,12 +10,14 @@
 
 #include <grpc++/grpc++.h>
 
-#include "cf_service/service/helper_files/client_helper.h"
-#include "recommender_service/service/helper_files/recommender_server_helper.h"
-#include "recommender_service/service/helper_files/timing.h"
-#include "recommender_service/service/helper_files/utils.h"
+#include "lookup_service/service/helper_files/client_helper.h"
+#include "mid_tier_service/service/helper_files/router_server_helper.h"
+#include "mid_tier_service/service/helper_files/timing.h"
+#include "mid_tier_service/service/helper_files/utils.h"
 
 #define NODEBUG
+
+typedef unsigned char UINT8;
 
 using grpc::Server;
 using grpc::ServerAsyncResponseWriter;
@@ -23,56 +25,58 @@ using grpc::ServerBuilder;
 using grpc::ServerContext;
 using grpc::ServerCompletionQueue;
 using grpc::Status;
-using recommender::RecommenderRequest;
-using recommender::RecommenderResponse;
-using recommender::RecommenderService;
+using router::RouterRequest;
+using router::LookupResponse;
+using router::RouterService;
 
 using grpc::Channel;
 using grpc::ClientAsyncResponseReader;
 using grpc::ClientContext;
 using grpc::CompletionQueue;
 using grpc::Status;
-using collaborative_filtering::CFRequest;
-using collaborative_filtering::UtilRequest;
-using collaborative_filtering::TimingDataInMicro;
-using collaborative_filtering::UtilResponse;
-using collaborative_filtering::CFResponse;
-using collaborative_filtering::CFService;
+using lookup::Key;
+using lookup::UtilRequest;
+using lookup::TimingDataInMicro;
+using lookup::UtilResponse;
+using lookup::Value;
+using lookup::LookupService;
 
 // Class declarations.
 class ServerImpl;
-class CFServiceClient;
+class LookupServiceClient;
 
 // Function declarations.
-void ProcessRequest(RecommenderRequest &recommender_request,
+void ProcessRequest(RouterRequest &router_request,
         uint64_t unique_request_id_value,
         int tid);
 
 // Global variable declarations.
 /* dataset_dim is global so that we can validate query dimensions whenever 
    batches of queries are received.*/
+unsigned int router_parallelism = 1, number_of_response_threads = 1, dispatch_parallelism = 1;
+int replication_cnt = 1, number_of_lookup_servers = 1;
+uint64_t create_lookup_srv_req_time = 0, unpack_lookup_srv_resp_time = 0, unpack_lookup_srv_req_time = 0, lookup_srv_time = 0, pack_lookup_srv_resp_time = 0;
+std::string ip = "localhost", lookup_server_ips_file;
+std::vector<std::string> lookup_server_ips;
 
-unsigned int recommender_parallelism = 0, number_of_response_threads = 0, number_of_cf_servers = 1, dispatch_parallelism = 0;
-std::string ip = "localhost", cf_server_ips_file = "";
-std::vector<std::string> cf_server_ips;
 uint64_t num_requests = 0;
-std::vector<CFServiceClient*> cf_srv_connections;
-/* Server object is global so that the async cf_srv client
+std::vector<LookupServiceClient*> lookup_srv_connections;
+/* Server object is global so that the async lookup_srv client
    thread can access it after it has merged all responses.*/
 ServerImpl* server;
 ResponseMap response_count_down_map;
 
 ThreadSafeQueue<bool> kill_notify;
 /* Fine grained locking while looking at individual responses from
-   multiple cf_srv servers. Coarse grained locking when we want to add
+   multiple lookup_srv servers. Coarse grained locking when we want to add
    or remove an element from the map.*/
-std::mutex response_map_mutex, thread_id, cf_server_id_mutex, map_coarse_mutex;
-std::vector<mutex_wrapper> cf_srv_conn_mutex;
+std::mutex response_map_mutex, thread_id, lookup_server_id_mutex, map_coarse_mutex;
+std::vector<mutex_wrapper> lookup_srv_conn_mutex;
 std::map<uint64_t, std::unique_ptr<std::mutex> > map_fine_mutex;
 int get_profile_stats = 0;
 bool first_req = false;
 
-CompletionQueue* cf_srv_cq = new CompletionQueue();
+CompletionQueue* lookup_srv_cq = new CompletionQueue();
 
 bool kill_signal = false;
 
@@ -120,7 +124,7 @@ class ServerImpl final {
                multiple requests at once.*/
             omp_set_dynamic(0);
             omp_set_nested(1);
-            omp_set_num_threads(recommender_parallelism);
+            omp_set_num_threads(router_parallelism);
             int tid = -1;
 #pragma omp parallel
             {
@@ -134,14 +138,15 @@ class ServerImpl final {
             {
                 worker_threads[i].join();
             }
+
         }
 
         void Finish(uint64_t unique_request_id,
-                RecommenderResponse* recommender_reply)
+                LookupResponse* router_reply)
         {
 
             CallData* call_data_req_to_finish = (CallData*) unique_request_id;
-            call_data_req_to_finish->Finish(recommender_reply);
+            call_data_req_to_finish->Finish(router_reply);
         }
 
     private:
@@ -151,7 +156,7 @@ class ServerImpl final {
                 // Take in the "service" instance (in this case representing an asynchronous
                 // server) and the completion queue "cq" used for asynchronous communication
                 // with the gRPC runtime.
-                CallData(RecommenderService::AsyncService* service, ServerCompletionQueue* cq)
+                CallData(RouterService::AsyncService* service, ServerCompletionQueue* cq)
                     : service_(service), cq_(cq), responder_(&ctx_), status_(CREATE) {
                         // Invoke the serving logic right away.
                         int tid = 0;
@@ -168,7 +173,7 @@ class ServerImpl final {
                         // the tag uniquely identifying the request (so that different CallData
                         // instances can serve different requests concurrently), in this case
                         // the memory address of this CallData instance.
-                        service_->RequestRecommender(&ctx_, &recommender_request_, &responder_, cq_, cq_,
+                        service_->RequestRouter(&ctx_, &router_request_, &responder_, cq_, cq_,
                                 this);
                     } else if (status_ == PROCESS) {
                         // Spawn a new CallData instance to serve new clients while we process
@@ -178,14 +183,14 @@ class ServerImpl final {
                         uint64_t unique_request_id_value = reinterpret_cast<uintptr_t>(this);
                         //uint64_t unique_request_id_value = num_reqs->AtomicallyIncrementCount();
                         // The actual processing.
-                        ProcessRequest(recommender_request_, 
+                        ProcessRequest(router_request_, 
                                 unique_request_id_value, 
                                 tid);
                         // And we are done! Let the gRPC runtime know we've finished, using the
                         // memory address of this instance as the uniquely identifying tag for
                         // the event.
                         //status_ = FINISH;
-                        //responder_.Finish(recommender_reply_, Status::OK, this);
+                        //responder_.Finish(router_reply_, Status::OK, this);
                     } else {
                         //GPR_ASSERT(status_ == FINISH);
                         // Once in the FINISH state, deallocate ourselves (CallData).
@@ -193,17 +198,17 @@ class ServerImpl final {
                     }
                 }
 
-                void Finish(RecommenderResponse* recommender_reply)
+                void Finish(LookupResponse* router_reply)
                 {
                     status_ = FINISH;
                     //GPR_ASSERT(status_ == FINISH);
-                    responder_.Finish(*recommender_reply, Status::OK, this);
+                    responder_.Finish(*router_reply, Status::OK, this);
                 }
 
             private:
                 // The means of communication with the gRPC runtime for an asynchronous
                 // server.
-                RecommenderService::AsyncService* service_;
+                RouterService::AsyncService* service_;
                 // The producer-consumer queue where for asynchronous server notifications.
                 ServerCompletionQueue* cq_;
                 // Context for the rpc, allowing to tweak aspects of it such as the use
@@ -211,12 +216,12 @@ class ServerImpl final {
                 // client.
                 ServerContext ctx_;
                 // What we get from the client.
-                RecommenderRequest recommender_request_;
+                RouterRequest router_request_;
                 // What we send back to the client.
-                RecommenderResponse recommender_reply_;
+                LookupResponse router_reply_;
 
                 // The means to get back to the client.
-                ServerAsyncResponseWriter<RecommenderResponse> responder_;
+                ServerAsyncResponseWriter<LookupResponse> responder_;
 
                 // Let's implement a tiny state machine with the following states.
                 enum CallStatus { CREATE, PROCESS, FINISH };
@@ -262,37 +267,38 @@ class ServerImpl final {
                 DispatchedData* request_to_be_dispatched = new DispatchedData();
                 request_to_be_dispatched->tag = tag;
                 dispatched_data_queue.push(request_to_be_dispatched);
-                //GPR_ASSERT(ok);
             }
         }
 
         std::unique_ptr<ServerCompletionQueue> cq_;
-        RecommenderService::AsyncService service_;
+        RouterService::AsyncService service_;
         std::unique_ptr<Server> server_;
 };
 
 
-/* Declaring cf_srv client here because the recommender server must
-   invoke the cf_srv client to send the queries+PointIDs to the cf_srv server.*/
-class CFServiceClient {
+/* Declaring lookup_srv client here because the router server must
+   invoke the lookup_srv client to send the queries+PointIDs to the lookup_srv server.*/
+class LookupServiceClient {
     public:
-        explicit CFServiceClient(std::shared_ptr<Channel> channel)
-            : stub_(CFService::NewStub(channel)) {}
+        explicit LookupServiceClient(std::shared_ptr<Channel> channel)
+            : stub_(LookupService::NewStub(channel)) {}
         /* Assambles the client's payload, sends it and presents the response back
            from the server.*/
-        void GetRating(const uint32_t cf_server_id,
+        void KeyLookup(const uint32_t lookup_server_id,
                 const bool util_present,
-                uint64_t request_id,
-                CFRequest request_to_cf_srv)
+                const uint64_t request_id,
+                Key request_to_lookup_srv)
         {
+            // Declare the set of queries that must be sent.
             // Create RCP request by adding queries, point IDs, and number of NN.
-            CreateCFServiceRequest(cf_server_id,
+            CreateLookupServiceRequest(lookup_server_id,
                     util_present,
-                    &request_to_cf_srv);
-            request_to_cf_srv.set_request_id(request_id);
-            //cf_srv_timing_info->create_cf_srv_request_time = end_time - start_time;
+                    &request_to_lookup_srv);
+
+            request_to_lookup_srv.set_request_id(request_id);
+            //lookup_srv_timing_info->create_lookup_srv_request_time = end_time - start_time;
             // Container for the data we expect from the server.
-            CFResponse reply;
+            Value reply;
             // Context for the client. 
             ClientContext context;
             // Call object to store rpc data
@@ -300,7 +306,7 @@ class CFServiceClient {
             // stub_->AsyncSayHello() performs the RPC call, returning an instance to
             // store in "call". Because we are using the asynchronous API, we need to
             // hold on to the "call" instance in order to get updates on the ongoing RPC.
-            call->response_reader = stub_->AsyncCF(&call->context, request_to_cf_srv, cf_srv_cq);
+            call->response_reader = stub_->AsyncKeyLookup(&call->context, request_to_lookup_srv, lookup_srv_cq);
             // Request that, upon completion of the RPC, "reply" be updated with the
             // server's response; "status" with the indication of whether the operation
             // was successful. Tag the request with the memory address of the call object.
@@ -312,7 +318,7 @@ class CFServiceClient {
         void AsyncCompleteRpc() {
             void* got_tag;
             bool ok = false;
-            cf_srv_cq->Next(&got_tag, &ok);
+            lookup_srv_cq->Next(&got_tag, &ok);
             //auto r = cq_.AsyncNext(&got_tag, &ok, gpr_time_0(GPR_CLOCK_REALTIME));
             //if (r == ServerCompletionQueue::TIMEOUT) return;
             //if (r == ServerCompletionQueue::GOT_EVENT) {
@@ -328,21 +334,27 @@ class CFServiceClient {
                 uint64_t s1 = GetTimeInMicro();
                 uint64_t unique_request_id = call->reply.request_id();
                 /* When this is not the last response, we need to decrement the count
-                   as well as collect response meta data - knn answer, cf_srv util, and
-                   cf_srv timing info.
+                   as well as collect response meta data - knn answer, lookup_srv util, and
+                   lookup_srv timing info.
                    When this is the last request, we remove this request from the map and 
-                   merge responses from all cf_srvs.*/
-                /* Create local DistCalc, CFSrvTimingInfo, CFSrvUtil variables,
-                   so that this thread can unpack received cf_srv data into these variables
+                   merge responses from all lookup_srvs.*/
+                /* Create local DistCalc, LookupSrvTimingInfo, BucketUtil variables,
+                   so that this thread can unpack received lookup_srv data into these variables
                    and then grab a lock to append to the response array in the map.*/
+                std::string value;
+                LookupSrvTimingInfo lookup_srv_timing_info;
+                LookupSrvUtil lookup_srv_util;
                 uint64_t start_time = GetTimeInMicro();
-                float rating = 0.0;
-                CFSrvTimingInfo cf_srv_timing_info;
-                CFSrvUtil cf_srv_util;
-                UnpackCFServiceResponse(call->reply,
-                        &rating,     
-                        &cf_srv_timing_info,
-                        &cf_srv_util);
+#ifndef NODEBUG
+                std::cout << "bef unpack lookup resp\n";
+#endif
+                UnpackLookupServiceResponse(call->reply,
+                        &value,
+                        &lookup_srv_timing_info,
+                        &lookup_srv_util);
+#ifndef NODEBUG
+                std::cout << "aft unpack lookup resp\n";
+#endif
                 uint64_t end_time = GetTimeInMicro();
                 // Make sure that the map entry corresponding to request id exists.
                 map_coarse_mutex.lock();
@@ -352,61 +364,61 @@ class CFServiceClient {
                     CHECK(false, "ERROR: Map entry corresponding to request id does not exist\n");
                 }
                 map_coarse_mutex.unlock();
-
+#ifndef NODEBUG
+                std::cout << "bef assigning lookup val\n";
+#endif
                 map_fine_mutex[unique_request_id]->lock();
-                int cf_srv_resp_id = response_count_down_map[unique_request_id].responses_recvd;
-                *(response_count_down_map[unique_request_id].response_data[cf_srv_resp_id].rating) = rating;
-                *(response_count_down_map[unique_request_id].response_data[cf_srv_resp_id].cf_srv_timing_info) = cf_srv_timing_info;
-                *(response_count_down_map[unique_request_id].response_data[cf_srv_resp_id].cf_srv_util) = cf_srv_util;
-                response_count_down_map[unique_request_id].response_data[cf_srv_resp_id].cf_srv_timing_info->unpack_cf_srv_resp_time = end_time - start_time;
-                
-                uint64_t total_time = response_count_down_map[unique_request_id].recommender_reply->total_calc_time();
-                response_count_down_map[unique_request_id].recommender_reply->set_total_calc_time(cf_srv_timing_info.cf_srv_time + total_time);
+                int lookup_srv_resp_id = response_count_down_map[unique_request_id].responses_recvd;
+                *(response_count_down_map[unique_request_id].response_data[lookup_srv_resp_id].value) = value;
+                *(response_count_down_map[unique_request_id].response_data[lookup_srv_resp_id].lookup_srv_timing_info) = lookup_srv_timing_info;
+                *(response_count_down_map[unique_request_id].response_data[lookup_srv_resp_id].lookup_srv_util) = lookup_srv_util;
 
-                if (response_count_down_map[unique_request_id].responses_recvd != (number_of_cf_servers - 1)) {
+                response_count_down_map[unique_request_id].response_data[lookup_srv_resp_id].lookup_srv_timing_info->unpack_lookup_srv_resp_time = end_time - start_time;
+#ifndef NODEBUG
+                std::cout << "aft assigning lookup val\n";
+#endif
+
+                if (response_count_down_map[unique_request_id].responses_recvd != (replication_cnt - 1)) {
                     response_count_down_map[unique_request_id].responses_recvd++;
                     map_fine_mutex[unique_request_id]->unlock();
-
                 } else {
-                    uint64_t cf_srv_resp_start_time = response_count_down_map[unique_request_id].recommender_reply->get_cf_srv_responses_time();
-                    response_count_down_map[unique_request_id].recommender_reply->set_get_cf_srv_responses_time(GetTimeInMicro() - cf_srv_resp_start_time);
+                    uint64_t lookup_srv_resp_start_time = response_count_down_map[unique_request_id].router_reply->get_lookup_srv_responses_time();
+                    response_count_down_map[unique_request_id].router_reply->set_get_lookup_srv_responses_time(GetTimeInMicro() - lookup_srv_resp_start_time);
                     /* Time to merge all responses received and then 
                        call terminate so that the response can be sent back
                        to the load generator.*/
-                    /* We now know that all cf_srvs have responded, hence we can 
+                    /* We now know that all lookup_srvs have responded, hence we can 
                        proceed to merge responses.*/
 
-                    /* We now know that all cf_srvs have responded, hence we can 
-                       proceed to merge responses.*/
-
+                    std::string lookup_val = "";
                     start_time = GetTimeInMicro();
-
+#ifndef NODEBUG
+                    std::cout << "bef merge\n";
+#endif
                     MergeAndPack(response_count_down_map[unique_request_id].response_data,
-                            number_of_cf_servers,
-                            response_count_down_map[unique_request_id].recommender_reply);
-
+                            replication_cnt,
+                            response_count_down_map[unique_request_id].router_reply);
+#ifndef NODEBUG
+                    std::cout << "aft merge\n";
+#endif
                     end_time = GetTimeInMicro();
-                    // response_count_down_map[unique_request_id].recommender_reply->set_recommender_time(end_time - start_time);
-                    response_count_down_map[unique_request_id].recommender_reply->set_pack_recommender_resp_time(end_time - start_time); 
-                    //uint64_t recommender_time = response_count_down_map[unique_request_id].recommender_reply->recommender_time();
-                    //uint64_t total_time = response_count_down_map[unique_request_id].recommender_reply->total_calc_time();
-                    //response_count_down_map[unique_request_id].recommender_reply->set_total_calc_time(total_time + (GetTimeInMicro() - recommender_time));
-                    // response_count_down_map[unique_request_id].recommender_reply->set_recommender_time(GetTimeInMicro() - recommender_time);
-                    //response_count_down_map[unique_request_id].recommender_reply->set_recommender_time(recommender_times[unique_request_id]);
+                    response_count_down_map[unique_request_id].router_reply->set_merge_time(end_time - start_time);
+                    response_count_down_map[unique_request_id].router_reply->set_pack_router_resp_time(end_time - start_time); 
+                    //response_count_down_map[unique_request_id].router_reply->set_router_time(router_times[unique_request_id]);
                     /* Call server finish for this particular request,
                        and pass the response so that it can be sent
                        by the server to the frontend.*/
-                    uint64_t prev_rec = response_count_down_map[unique_request_id].recommender_reply->recommender_time();
-                    response_count_down_map[unique_request_id].recommender_reply->set_recommender_time(prev_rec + (GetTimeInMicro() - s1));
+                    uint64_t prev_rec = response_count_down_map[unique_request_id].router_reply->router_time();
+                    response_count_down_map[unique_request_id].router_reply->set_router_time(prev_rec + (GetTimeInMicro() - s1));
                     map_fine_mutex[unique_request_id]->unlock();
 
                     map_coarse_mutex.lock();
                     server->Finish(unique_request_id, 
-                            response_count_down_map[unique_request_id].recommender_reply);
+                            response_count_down_map[unique_request_id].router_reply);
                     map_coarse_mutex.unlock();
                 }
             } else {
-                CHECK(false, "cf_srv does not exist\n");
+                CHECK(false, "lookup_srv does not exist\n");
             }
             // Once we're complete, deallocate the call object.
             delete call;
@@ -416,37 +428,35 @@ class CFServiceClient {
         // struct for keeping state and data information
         struct AsyncClientCall {
             // Container for the data we expect from the server.
-            CFResponse reply;
+            Value reply;
             // Context for the client. It could be used to convey extra information to
             // the server and/or tweak certain RPC behaviors.
             ClientContext context;
             // Storage for the status of the RPC upon completion.
             Status status;
-            std::unique_ptr<ClientAsyncResponseReader<CFResponse>> response_reader;
+            std::unique_ptr<ClientAsyncResponseReader<Value>> response_reader;
         };
 
         // Out of the passed in Channel comes the stub, stored here, our view of the
         // server's exposed services.
-        std::unique_ptr<CFService::Stub> stub_;
+        std::unique_ptr<LookupService::Stub> stub_;
 
         // The producer-consumer queue we use to communicate asynchronously with the
         // gRPC runtime.
         CompletionQueue cq_;
         };
 
-        void ProcessRequest(RecommenderRequest &recommender_request, 
+        void ProcessRequest(RouterRequest &router_request, 
                 uint64_t unique_request_id_value,
                 int tid)
         {
             uint64_t s1 =0, e1 =0;
             s1 = GetTimeInMicro();
             if (!started->AtomicallyReadFlag()) {
-                std::cout << "set\n";
                 started->AtomicallySetFlag(true);
             }
             /* Deine the map entry corresponding to this
                unique request.*/
-            // Get number of nearest neighbors from the request.
             // Declare the size of the final response that the map must hold.
             map_coarse_mutex.lock();
             ResponseMetaData meta_data;
@@ -457,31 +467,26 @@ class CFServiceClient {
             map_coarse_mutex.unlock();
 
             map_fine_mutex[unique_request_id_value]->lock();
-            if (recommender_request.kill()) {
-#if 0
+            if (router_request.kill()) {
                 kill_signal = true;
-                response_count_down_map[unique_request_id_value].recommender_reply->set_kill_ack(true);
+                response_count_down_map[unique_request_id_value].router_reply->set_kill_ack(true);
                 server->Finish(unique_request_id_value,
-                        response_count_down_map[unique_request_id_value].recommender_reply);
+                        response_count_down_map[unique_request_id_value].router_reply);
                 sleep(4);
                 CHECK(false, "Exit signal received\n");
-#endif
             }
             response_count_down_map[unique_request_id_value].responses_recvd = 0;
-            response_count_down_map[unique_request_id_value].response_data.resize(number_of_cf_servers, ResponseData());
-            for (int i = 0; i < number_of_cf_servers; i++) {
-                response_count_down_map[unique_request_id_value].response_data[i] = ResponseData();
-            }
-            response_count_down_map[unique_request_id_value].recommender_reply->set_request_id(recommender_request.request_id());
-            response_count_down_map[unique_request_id_value].recommender_reply->set_num_inline(recommender_parallelism);
-            response_count_down_map[unique_request_id_value].recommender_reply->set_num_workers(dispatch_parallelism);
-            response_count_down_map[unique_request_id_value].recommender_reply->set_num_resp(number_of_response_threads);
+            response_count_down_map[unique_request_id_value].response_data.resize(replication_cnt, ResponseData());
+            response_count_down_map[unique_request_id_value].router_reply->set_request_id(router_request.request_id());
+            response_count_down_map[unique_request_id_value].router_reply->set_num_inline(router_parallelism);
+            response_count_down_map[unique_request_id_value].router_reply->set_num_workers(dispatch_parallelism);
+            response_count_down_map[unique_request_id_value].router_reply->set_num_resp(number_of_response_threads);
             //map_fine_mutex[unique_request_id_value]->unlock();
 
-            bool util_present = recommender_request.util_request().util_request();
+            bool util_present = router_request.util_request().util_request();
             /* If the load generator is asking for util info,
                it means the time period has expired, so 
-               the recommender must read /proc/stat to provide user, system, and io times.*/
+               the router must read /proc/stat to provide user, system, and io times.*/
             if(util_present)
             {
                 uint64_t start = GetTimeInMicro();
@@ -491,62 +496,71 @@ class CFServiceClient {
                         &io_time,
                         &idle_time);
                 //map_fine_mutex[unique_request_id_value]->lock();
-                response_count_down_map[unique_request_id_value].recommender_reply->mutable_util_response()->mutable_recommender_util()->set_user_time(user_time);
-                response_count_down_map[unique_request_id_value].recommender_reply->mutable_util_response()->mutable_recommender_util()->set_system_time(system_time);
-                response_count_down_map[unique_request_id_value].recommender_reply->mutable_util_response()->mutable_recommender_util()->set_io_time(io_time);
-                response_count_down_map[unique_request_id_value].recommender_reply->mutable_util_response()->mutable_recommender_util()->set_idle_time(idle_time);
-                response_count_down_map[unique_request_id_value].recommender_reply->mutable_util_response()->set_util_present(true);
-                response_count_down_map[unique_request_id_value].recommender_reply->set_update_recommender_util_time(GetTimeInMicro() - start);
+                response_count_down_map[unique_request_id_value].router_reply->mutable_util_response()->mutable_router_util()->set_user_time(user_time);
+                response_count_down_map[unique_request_id_value].router_reply->mutable_util_response()->mutable_router_util()->set_system_time(system_time);
+                response_count_down_map[unique_request_id_value].router_reply->mutable_util_response()->mutable_router_util()->set_io_time(io_time);
+                response_count_down_map[unique_request_id_value].router_reply->mutable_util_response()->mutable_router_util()->set_idle_time(idle_time);
+                response_count_down_map[unique_request_id_value].router_reply->mutable_util_response()->set_util_present(true);
+                response_count_down_map[unique_request_id_value].router_reply->set_update_router_util_time(GetTimeInMicro() - start);
                 //map_fine_mutex[unique_request_id_value]->unlock();
             }
             uint64_t start_time = GetTimeInMicro();
-            // Get #queries and #dimensions from received queries.
-
-            CFRequest request_to_cf_srv;
-            int user = 0, item = 0;
-            UnpackRecommenderServiceRequest(recommender_request,
-                    &user,
-                    &item,
-                    &request_to_cf_srv);
-            //std::cout << "User: " << user << " Movie: " << item << "\n";
+            std::string key = "", value = "";
+            uint32_t operation = 1;
+            Key request_to_lookup_srv;
 #ifndef NODEBUG
-            std::cout << "aft unpack\n";
+            std::cout << "bef unpack router service req\n";
+#endif
+            UnpackRouterServiceRequest(router_request,
+                    &key,
+                    &value,
+                    &operation,
+                    &request_to_lookup_srv);
+#ifndef NODEBUG
+            std::cout << "aft unpack router service req\n";
 #endif
             uint64_t end_time = GetTimeInMicro();
             //map_fine_mutex[unique_request_id_value]->lock();
-            response_count_down_map[unique_request_id_value].recommender_reply->set_unpack_recommender_req_time((end_time-start_time));
-            // response_count_down_map[unique_request_id_value].recommender_reply->set_recommender_time(GetTimeInMicro());
+            response_count_down_map[unique_request_id_value].router_reply->set_unpack_router_req_time((end_time-start_time));
             //map_fine_mutex[unique_request_id_value]->unlock();
             //float points_sent_percent = PercentDataSent(point_ids, queries_size, dataset_size);
-            //printf("Amount of dataset sent to cf_srv server in the form of point IDs = %.5f\n", points_sent_percent);
-            //(*response_count_down_map)[unique_request_id_value]->recommender_reply->set_percent_data_sent(points_sent_percent);
+            //printf("Amount of dataset sent to lookup_srv server in the form of point IDs = %.5f\n", points_sent_percent);
+            //(*response_count_down_map)[unique_request_id_value]->router_reply->set_percent_data_sent(points_sent_percent);
 
             //map_fine_mutex[unique_request_id_value]->lock();
-            response_count_down_map[unique_request_id_value].recommender_reply->set_get_cf_srv_responses_time(GetTimeInMicro());
+            response_count_down_map[unique_request_id_value].router_reply->set_get_lookup_srv_responses_time(GetTimeInMicro());
             //map_fine_mutex[unique_request_id_value]->unlock();
 
+            int lookup_srv_to_send_req_to = 0;
+            //int replication_count = 1;
+            int replication_count = replication_cnt;
+            if (request_to_lookup_srv.operation() == 2) {
+                replication_count = replication_cnt;
+            }
+            for(int i = 0; i < replication_count; i++) {
+                lookup_srv_to_send_req_to = (SpookyHash::Hash32(key.c_str(), key.size(), 0) + i) % number_of_lookup_servers;
+                int router = (tid * number_of_lookup_servers) + lookup_srv_to_send_req_to;
 
-            for(unsigned int i = 0; i < number_of_cf_servers; i++) {
-                int index = (tid*number_of_cf_servers) + i;
-                cf_srv_connections[index]->GetRating(i,
+                lookup_srv_connections[router]->KeyLookup(lookup_srv_to_send_req_to,
                         util_present,
                         unique_request_id_value,
-                        request_to_cf_srv);
+                        request_to_lookup_srv);
             }
             e1 = GetTimeInMicro() - s1;
-            response_count_down_map[unique_request_id_value].recommender_reply->set_recommender_time(e1);
+            response_count_down_map[unique_request_id_value].router_reply->set_router_time(e1);
             map_fine_mutex[unique_request_id_value]->unlock();
         }
 
         /* The request processing thread runs this 
-           function. It checks all the cf_srv socket connections one by
+           function. It checks all the lookup_srv socket connections one by
            one to see if there is a response. If there is one, it then
            implements the count down mechanism in the global map.*/
         void ProcessResponses()
         {
             while(true)
             {
-                cf_srv_connections[0]->AsyncCompleteRpc();
+                lookup_srv_connections[0]->AsyncCompleteRpc();
+                sleep(1);
             }
 
         }
@@ -636,8 +650,8 @@ class CFServiceClient {
             while (true) {
                 if (started->AtomicallyReadFlag()) {
                     std::string s = "sudo /usr/share/bcc/tools/runqlat 30 1 > runqlat.txt";
-                    char* cmd = new char[s.length() + 1];         
-                    std::strcpy(cmd, s.c_str());                                
+                    char* cmd = new char[s.length() + 1];
+                    std::strcpy(cmd, s.c_str());
                     ExecuteShellCommand(cmd);
                     break;
                 }
@@ -658,7 +672,7 @@ class CFServiceClient {
         }
 
         void Tcpretrans()
-        {
+        {   
             while (true) {
                 if (started->AtomicallyReadFlag()) {
                     std::string s = "sudo /usr/share/bcc/tools/tcpretrans -c -l > tcpretrans.txt";
@@ -670,31 +684,46 @@ class CFServiceClient {
             }
         }
 
+
+
         int main(int argc, char** argv) {
-            if (argc == 7) {
-                number_of_cf_servers = atoi(argv[1]);
-                cf_server_ips_file = argv[2];
+            if (argc == 8) {
+                number_of_lookup_servers = atoi(argv[1]);
+                lookup_server_ips_file = argv[2];
                 ip = argv[3];
-                recommender_parallelism = atoi(argv[4]);
+                router_parallelism = atoi(argv[4]);
                 dispatch_parallelism = atoi(argv[5]);
                 number_of_response_threads = atoi(argv[6]);
+                replication_cnt = atoi(argv[7]);
             } else {
-                CHECK(false, "<./recommender_server> <number of cf servers> <cf server ips file> <ip:port number> <recommender parallelism>\n");
+                CHECK(false, "<./router_server> <number of lookup servers> <lookup server ips file> <ip:port number> <router parallelism> <dispatch parallelism> <num of response threads> <replication cnt>\n");
             }
-            // Load cf server IPs into a string vector
-            GetCFServerIPs(cf_server_ips_file, &cf_server_ips);
+
+            CHECK((replication_cnt <= number_of_lookup_servers), "Replication count must be less than or equal to number of lookup servers\n");
+            // Load lookup server IPs into a string vector
+            GetLookupServerIPs(lookup_server_ips_file, &lookup_server_ips);
+
 
             for(unsigned int i = 0; i < dispatch_parallelism; i++)
             {
-                for(unsigned int j = 0; j < number_of_cf_servers; j++)
+                for(int j = 0; j < number_of_lookup_servers; j++)
                 {
-                    std::string ip = cf_server_ips[j];
-                    cf_srv_connections.emplace_back(new CFServiceClient(grpc::CreateChannel(
+                    std::string ip = lookup_server_ips[j];
+                    lookup_srv_connections.emplace_back(new LookupServiceClient(grpc::CreateChannel(
                                     ip, grpc::InsecureChannelCredentials())));
                 }
             }
             std::vector<std::thread> response_threads;
-/*            std::thread perf(Perf);
+            for(unsigned int i = 0; i < number_of_response_threads; i++)
+            {
+                response_threads.emplace_back(std::thread(ProcessResponses));
+            }
+
+        //    std::thread kill_ack = std::thread(FinalKill);
+#if 0
+        //    std::thread perf(Perf);
+#endif
+        /*    std::thread perf(Perf);
             std::thread syscount(SysCount);
             std::thread hardirqs(Hardirqs);
             std::thread wakeuptime(Wakeuptime);
@@ -702,22 +731,15 @@ class CFServiceClient {
             std::thread runqlat(Runqlat);
             //std::thread hitm(Hitm);
             std::thread tcpretrans(Tcpretrans);
-*/
-            for(unsigned int i = 0; i < number_of_response_threads; i++)
-            {
-                response_threads.emplace_back(std::thread(ProcessResponses));
-            }
-
-//            std::thread kill_ack = std::thread(FinalKill);
-
+        */
             server = new ServerImpl();
             server->Run();
             for(unsigned int i = 0; i < number_of_response_threads; i++)
             {
                 response_threads[i].join();
             }
-/*
-            kill_ack.join();
+
+          /*  kill_ack.join();
             perf.join();
             syscount.join();
             hardirqs.join();
@@ -725,6 +747,10 @@ class CFServiceClient {
             softirqs.join();
             runqlat.join();
             //hitm.join();
-            tcpretrans.join();
-*/            return 0;
+            tcpretrans.join(); */
+#if 0
+          //  perf.join();
+#endif
+
+            return 0;
         }

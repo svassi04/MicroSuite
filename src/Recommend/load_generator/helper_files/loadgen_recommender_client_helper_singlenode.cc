@@ -4,7 +4,7 @@ LoadGenCommandLineArgs* ParseLoadGenCommandLine(const int &argc,
         char** argv)
 {
     struct LoadGenCommandLineArgs* load_gen_command_line_args = new struct LoadGenCommandLineArgs();
-    if (argc == 6) {
+    if (argc == 7) {
         try
         {
             load_gen_command_line_args->queries_file_name = argv[1];
@@ -12,6 +12,7 @@ LoadGenCommandLineArgs* ParseLoadGenCommandLine(const int &argc,
             load_gen_command_line_args->time_duration = std::stoul(argv[3], nullptr, 0);
             load_gen_command_line_args->qps = std::atof(argv[4]);
             load_gen_command_line_args->ip = argv[5];
+            load_gen_command_line_args->cpu = argv[6];
         }
         catch(...)
         {
@@ -32,13 +33,9 @@ void CreateQueriesFromFile(std::string queries_file_name,
     for(int i = 0; std::getline(file, line); i++)
     {
         std::istringstream buf(line);
-        std::string token;
-//        std::istream_iterator<std::string> begin(buf), end;
-        std::vector<std::string> tokens;//(begin, end);
-        while (std::getline(buf, token, ',')) {
-            tokens.push_back(token);
-        }
-        //std::cout << line << "\n";
+        std::istream_iterator<std::string> begin(buf), end;
+        std::vector<std::string> tokens(begin, end);
+
         queries->emplace_back(std::pair<int, int>());
         int itr = 0, first = 0, second = 0;
         for(auto& s: tokens)
